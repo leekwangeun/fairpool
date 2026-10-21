@@ -5,7 +5,6 @@ import { store } from '../store';
 import {
   Button,
   Card,
-  Checkbox,
   Chip,
   DigitsInput,
   ErrorText,
@@ -102,7 +101,6 @@ function Join({
   const [onTheWay, setOnTheWay] = useState(!!trip.me?.pickup);
   const [pickup, setPickup] = useState<Place | null>(trip.me?.pickup ?? null);
   const [dropoff, setDropoff] = useState<Place | null>(trip.me?.dropoff ?? null);
-  const [savePlace, setSavePlace] = useState(trip.me?.save_place ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -120,7 +118,6 @@ function Join({
         p_pickup: onTheWay ? pickup : null,
         p_dropoff: dropoff,
         p_phone4: phone4.length === 4 ? phone4 : null,
-        p_save_place: savePlace,
       });
       store.setMyName(name.trim());
       onDone(t);
@@ -178,13 +175,11 @@ function Join({
         <Field label="내릴 곳">
           <PlaceSearch value={dropoff} onChange={setDropoff} placeholder="어디서 내릴까요?" />
         </Field>
-        <p className="t-caption text-faint">정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요</p>
-        <Checkbox
-          checked={savePlace}
-          onChange={setSavePlace}
-          title={`[선택] 다음에도 이 장소로 탈 수 있게 ${trip.driver_name}님 차에 저장해요`}
-          sub="저장하지 않으면 다음 운행 때 다시 넣어요. 저장한 뒤에도 언제든 지울 수 있어요"
-        />
+        <p className="t-caption text-faint">
+          {trip.carpool_code
+            ? '정확한 위치는 운행이 끝나면 지워요. 정기 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 지울 수 있어요'
+            : '정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요'}
+        </p>
       </Card>
 
       {!editing && <p className="t-caption text-center text-sub">참여하면 픽업 시간과 정산 금액을 여기서 볼 수 있어요</p>}

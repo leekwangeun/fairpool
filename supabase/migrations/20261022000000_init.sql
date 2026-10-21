@@ -69,7 +69,8 @@ create table public.carpools (
   archived_at    timestamptz
 );
 
--- Stops are copied into the next trip only for members who agreed to keep them (save_place).
+-- Stops of a saved carpool are kept for its next trip; a member can remove them any time
+-- ("내 장소 지우기", save_place = false). One-off trips keep nothing.
 create table public.carpool_members (
   id              uuid primary key default gen_random_uuid(),
   carpool_id      uuid not null references public.carpools(id) on delete cascade,
@@ -113,7 +114,7 @@ create table public.trip_passengers (
   dropoff         jsonb,
   device_key_hash text not null,
   phone4_hash     text,                  -- last 4 digits of the phone, hashed, to re-open on another device
-  save_place      boolean not null default false,
+  save_place      boolean not null default true,  -- false after "내 장소 지우기"
   estimate        numeric,               -- expected share posted by the car while driving
   seat            text,
   joined_at       timestamptz not null default now(),
@@ -390,7 +391,7 @@ create or replace function public.join_trip(
   p_pickup jsonb default null,
   p_dropoff jsonb default null,
   p_phone4 text default null,
-  p_save_place boolean default false
+  p_save_place boolean default null     -- null keeps the current choice (new members: kept)
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
@@ -415,13 +416,13 @@ begin
   insert into public.trip_passengers (trip_id, name, pickup, dropoff, device_key_hash, phone4_hash, save_place)
   values (t.id, trim(p_name), p_pickup, p_dropoff, public._hash(p_device_key),
           case when p_phone4 ~ '^[0-9]{4}$' then public._hash(t.id::text || p_phone4) end,
-          coalesce(p_save_place, false))
+          coalesce(p_save_place, true))
   on conflict (trip_id, device_key_hash) do update
     set name = excluded.name,
         pickup = excluded.pickup,
         dropoff = coalesce(excluded.dropoff, public.trip_passengers.dropoff),
         phone4_hash = coalesce(excluded.phone4_hash, public.trip_passengers.phone4_hash),
-        save_place = excluded.save_place;
+        save_place = coalesce(p_save_place, public.trip_passengers.save_place);
   return public.get_trip(p_code, p_device_key);
 end $$;
 

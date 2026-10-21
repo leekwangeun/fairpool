@@ -101,8 +101,8 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   const { driver_secret } = await rpc(db, 'create_driver', { p_display_name: '민호' });
   const first = await rpc(db, 'create_trip', { p_title: '출근 카풀', p_destination: place('회사'),
                                               p_driver_secret: driver_secret });
-  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진',
-                               p_pickup: place('버스정류장'), p_save_place: true });
+  // no consent step: places of a saved carpool are kept by default and can be removed later
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진', p_pickup: place('버스정류장') });
   await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤', p_pickup: place('도윤 집') });
   const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
                                                           p_driver_secret: driver_secret });
@@ -118,9 +118,9 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
   assert.notEqual(next.code, first.code);
   const again = await rpc(db, 'get_trip', { p_code: next.code, p_device_key: device(1) });
-  assert.equal(again.me.pickup.label, '버스정류장', 'member who agreed keeps the same stop');
+  assert.equal(again.me.pickup.label, '버스정류장', 'members keep the same stop');
   const other = await rpc(db, 'get_trip', { p_code: next.code, p_device_key: device(2) });
-  assert.equal(other.me.pickup, null, 'member who did not agree enters the place again');
+  assert.equal(other.me.pickup.label, '도윤 집');
   await rpc(db, 'post_settlement', { p_code: next.code, p_admin_secret: next.admin_secret,
                                      p_payload: await shareFor(next.code, next.admin_secret) });
 
@@ -128,6 +128,11 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   const third = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
   const cleared = await rpc(db, 'get_trip', { p_code: third.code, p_device_key: device(1) });
   assert.equal(cleared.me.pickup, null, '내 장소 지우기 removes the kept place');
+  assert.equal(cleared.me.save_place, false, 'and the choice sticks');
+  // editing the stop again later does not silently turn saving back on
+  await rpc(db, 'join_trip', { p_code: third.code, p_device_key: device(1), p_name: '수진', p_pickup: place('새 정류장') });
+  assert.equal((await rpc(db, 'get_trip', { p_code: third.code, p_device_key: device(1) })).me.save_place, false);
+  assert.equal((await rpc(db, 'get_trip', { p_code: third.code, p_device_key: device(2) })).me.pickup.label, '도윤 집');
   await rpc(db, 'set_trip_status', { p_code: third.code, p_admin_secret: third.admin_secret, p_status: 'cancelled' });
 
   const cp = await rpc(db, 'get_carpool', { p_carpool_code: carpool_code, p_device_key: device(1) });
