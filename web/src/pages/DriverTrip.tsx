@@ -141,7 +141,7 @@ export default function DriverTrip() {
         <div className="flex flex-col gap-2.5">
           {trip.carpool_code ? (
             <Card className="gap-2">
-              <h2 className="t-strong">정기 카풀로 저장됨</h2>
+              <h2 className="t-strong">즐겨찾기에 추가됨</h2>
               <p className="t-caption text-sub">동승자가 이 링크를 홈 화면에 두면 다음 운행도 같은 곳에서 열려요.</p>
               <button type="button" onClick={() => copy(carpoolLink(trip.carpool_code!), 'carpool')} className="t-strong truncate text-left text-brand">
                 {copied === 'carpool' ? '복사했어요' : carpoolLink(trip.carpool_code)}
@@ -150,7 +150,7 @@ export default function DriverTrip() {
           ) : (
             store.driverSecret() && (
               <Button variant="secondary" onClick={() => run(() => rpc('save_carpool', { p_code: code, p_admin_secret: secret, p_driver_secret: store.driverSecret() }))}>
-                정기 카풀로 저장
+                즐겨찾기에 추가
               </Button>
             )
           )}

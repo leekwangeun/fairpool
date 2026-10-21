@@ -140,7 +140,6 @@ function Join({
         <p className="t-caption text-brand">{trip.driver_name}님이 카풀에 초대했어요</p>
         <h1 className="t-title">{trip.title}</h1>
         <div className="flex flex-wrap items-center gap-2">
-          {trip.carpool_code && <Chip tone="accent">저장되는 카풀</Chip>}
           <Chip>
             자리 {trip.seats}개 중 {trip.seats_left}개 남음
           </Chip>
@@ -177,7 +176,7 @@ function Join({
         </Field>
         <p className="t-caption text-faint">
           {trip.carpool_code
-            ? '정확한 위치는 운행이 끝나면 지워요. 정기 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 지울 수 있어요'
+            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 지울 수 있어요'
             : '정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요'}
         </p>
       </Card>
@@ -504,7 +503,7 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
         <section className="flex w-full flex-col items-start gap-2 rounded-[20px] bg-brand-soft px-[18px] py-4">
           <p className="t-strong text-brand">{trip.driver_name}님 차에 내 장소가 저장됐어요</p>
           <p className="t-caption text-sub">
-            다음에 같은 카풀을 불러오면 {[me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', ')}
+            다음에 이 카풀로 운행하면 {[me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', ')}
             {me.dropoff ? '가' : ''} 바로 채워져요
           </p>
           <button type="button" onClick={forgetPlace} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">

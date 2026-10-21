@@ -19,7 +19,7 @@ const messages: Record<string, string> = {
   verify_failed: '이름이나 번호가 맞지 않아요.',
   too_many_attempts: '확인을 너무 많이 시도했어요. 운전자에게 다시 초대해 달라고 해 주세요.',
   link_expired: '연결 코드가 만료됐어요. 차 화면에서 새 QR을 띄워 주세요.',
-  carpool_not_found: '정기 카풀을 찾을 수 없어요.',
+  carpool_not_found: '즐겨찾기 카풀을 찾을 수 없어요.',
 };
 
 export class ApiError extends Error {

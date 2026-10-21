@@ -92,7 +92,7 @@ export default function Home() {
 
       {driver.carpools.length > 0 && (
         <Card className="flex flex-col gap-3">
-          <h2 className="font-semibold">정기 카풀</h2>
+          <h2 className="t-strong">즐겨찾기</h2>
           {driver.carpools.map((c) => (
             <div key={c.code} className="flex items-center justify-between gap-3">
               <span className="truncate">{c.title}</span>
