@@ -119,10 +119,11 @@ test('carpool folder stacks trips and settles them together', async () => {
   await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_name: '페어은행',
                                    p_bank_account: '111-222', p_account_holder: '지훈', p_bank_consent: true });
   const first = await rpc(db, 'create_trip', { p_title: '출근', p_driver_secret: driver_secret });
-  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진' });
-  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤' });
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진', p_phone4: '1111' });
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤', p_phone4: '2222' });
   const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
                                                           p_driver_secret: driver_secret });
+  const page = (code, n) => rpc(db, 'get_settle_page', { p_code: code, p_device_key: device(n) });
   const settle = async (trip, sujin, doyoon) => {
     const ps = (await rpc(db, 'get_trip_admin', { p_code: trip.code, p_admin_secret: trip.admin_secret })).passengers;
     const id = (n) => ps.find((p) => p.name === n).id;
@@ -145,7 +146,8 @@ test('carpool folder stacks trips and settles them together', async () => {
   let v = await view(first, 1);
   assert.equal(v.folder.status, 'open');
   assert.equal(v.folder.rides.length, 1);
-  assert.equal(v.folder.totals, null, 'other riders\' sums stay hidden before the request');
+  assert.equal(v.folder.page, null, 'folder trips get no settlement page of their own');
+  assert.equal(v.settlement, null, 'nor everyone\'s shares of that trip');
   assert.equal(v.bank, null, '요청 전: nothing to send yet');
 
   // the next trip of the favourite suggests the same folder
@@ -162,15 +164,32 @@ test('carpool folder stacks trips and settles them together', async () => {
   let list = await rpc(db, 'list_folders', { p_secret: driver_secret });
   assert.deepEqual([list[0].name, list[0].status, list[0].trips, Number(list[0].amount)], ['출근 카풀', 'open', 2, 9720]);
 
-  // 합쳐서 정산하기
+  // 합쳐서 정산하기 makes one settlement page for the batch
   let f = await rpc(db, 'request_batch', { p_folder_code: folder, p_secret: driver_secret });
   assert.equal(f.requested.payments.length, 2);
   assert.equal(f.open.trips.length, 0);
+  const code = f.requested.code;
+  assert.match(code, /^[2-9A-HJ-NP-Z]{8}$/);
   v = await view(first, 1);
-  assert.equal(v.folder.status, 'requested');
-  assert.equal(Number(v.folder.payment.amount), 4860);
-  assert.equal(v.folder.totals.trips, 2);
-  assert.equal(v.bank.account, '111-222', '정산 중: the account is shown');
+  assert.equal(v.folder.page, code, 'the trip page points to the settlement page');
+  assert.equal(v.bank, null, 'the account is on the settlement page only');
+  let p = await page(code, 1);
+  assert.equal(p.status, 'requested');
+  assert.equal(Number(p.me.amount), 4860);
+  assert.equal(p.me.rides.length, 2);
+  assert.equal(p.bank.account, '111-222', '정산 중: the account is shown');
+  assert.ok(!JSON.stringify(p).includes('도윤'), 'each rider sees only their own part');
+  const stranger = await page(code, 9);
+  assert.equal(stranger.me, null);
+  assert.equal(stranger.bank, null);
+  // another phone: name + last 4 digits
+  assert.equal((await rpc(db, 'verify_settle_page', { p_code: code, p_device_key: device(8), p_name: '수진',
+                                                      p_phone4: '0000' })).error, 'verify_failed');
+  p = await rpc(db, 'verify_settle_page', { p_code: code, p_device_key: device(8), p_name: '수진', p_phone4: '1111' });
+  assert.equal(Number(p.me.amount), 4860);
+  await rpc(db, 'report_settle_issue', { p_code: code, p_device_key: device(8), p_message: '금액 확인 부탁해요' });
+  f = await rpc(db, 'get_folder_admin', { p_folder_code: folder, p_secret: driver_secret });
+  assert.equal(f.requested.issues[0].name, '수진');
 
   // a trip made meanwhile goes to a new batch; the requested one is locked
   const third = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
@@ -178,35 +197,40 @@ test('carpool folder stacks trips and settles them together', async () => {
   await rpc(db, 'choose_settlement', { p_code: third.code, p_admin_secret: third.admin_secret,
                                        p_mode: 'folder', p_folder_code: folder });
   v = await view(third, 1);
-  assert.equal(v.folder.status, 'requested', 'the newest trip link still shows what is owed');
-  assert.equal(Number(v.folder.payment.amount), 4860);
-  assert.equal(v.bank.account, '111-222');
+  assert.equal(v.folder.page, code, 'the newest trip link still leads to what is owed');
+  assert.equal(v.folder.status, 'open');
   await assert.rejects(rpc(db, 'choose_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
                                                       p_mode: 'direct' }), /batch_locked/);
   await assert.rejects(rpc(db, 'request_batch', { p_folder_code: folder, p_secret: driver_secret }), /batch_in_progress/);
 
-  // 정산 요청 취소 puts everything back into one open batch
+  // 정산 요청 취소 puts everything back into one open batch and closes the page
   f = await rpc(db, 'cancel_batch_request', { p_folder_code: folder, p_secret: driver_secret });
   assert.equal(f.requested, null);
   assert.equal(f.open.trips.length, 3);
-  assert.equal((await view(first, 1)).bank, null);
+  await assert.rejects(page(code, 1), /page_not_found/);
+  assert.equal((await view(first, 1)).folder.page, null);
 
   f = await rpc(db, 'request_batch', { p_folder_code: folder, p_secret: driver_secret });
-  const sujinPay = f.requested.payments.find((p) => p.name === '수진');
+  const code2 = f.requested.code;
+  const sujinPay = f.requested.payments.find((x) => x.name === '수진');
   assert.equal(Number(sujinPay.amount), 7360);
   assert.equal(sujinPay.trips, 3);
   f = await rpc(db, 'mark_batch_paid', { p_folder_code: folder, p_secret: driver_secret, p_payment_id: sujinPay.id });
   assert.ok(f.requested, 'still in progress while someone has not paid');
-  assert.equal((await view(first, 1)).bank, null, 'taken down for the one who paid');
-  assert.equal((await view(first, 2)).bank.account, '111-222', 'still shown to the one who has not');
+  p = await page(code2, 1);
+  assert.equal(p.me.paid, true);
+  assert.equal(p.bank, null, 'taken down for the one who paid');
+  assert.equal((await page(code2, 2)).bank.account, '111-222', 'still shown to the one who has not');
 
-  const doyoonPay = f.requested.payments.find((p) => p.name === '도윤');
+  const doyoonPay = f.requested.payments.find((x) => x.name === '도윤');
   f = await rpc(db, 'mark_batch_paid', { p_folder_code: folder, p_secret: driver_secret, p_payment_id: doyoonPay.id });
   assert.equal(f.requested, null);
   assert.ok(f.last_done);
   v = await view(third, 2);
-  assert.equal(v.folder.status, 'done');
-  assert.equal(v.bank, null, '정산 완료: the account is taken down');
+  assert.equal(v.folder.page, code2, 'a finished trip still opens its settlement page');
+  p = await page(code2, 2);
+  assert.equal(p.status, 'done');
+  assert.equal(p.bank, null, '정산 완료: the account is taken down');
 
   list = await rpc(db, 'list_folders', { p_secret: driver_secret });
   assert.deepEqual([list[0].status, list[0].trips], ['open', 0], 'the folder keeps going from zero');
@@ -241,7 +265,17 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   await rpc(db, 'post_settlement', { p_code: next.code, p_admin_secret: next.admin_secret,
                                      p_payload: await shareFor(next.code, next.admin_secret) });
 
-  await rpc(db, 'forget_my_place', { p_code: next.code, p_device_key: device(1) });
+  // 내 장소 삭제 요청: the passenger asks, the driver approves; the finished trip's record stays
+  const asked = await rpc(db, 'request_place_removal', { p_code: next.code, p_device_key: device(1) });
+  assert.equal(asked.me.removal_requested, true);
+  assert.equal(asked.me.save_place, true, 'nothing changes until the driver approves');
+  const sujinId = (await rpc(db, 'get_trip_admin', { p_code: next.code, p_admin_secret: next.admin_secret }))
+    .passengers.find((p) => p.name === '수진').id;
+  const approved = await rpc(db, 'resolve_place_removal', { p_code: next.code, p_admin_secret: next.admin_secret,
+                                                           p_passenger_id: sujinId });
+  const sujinRow = approved.passengers.find((p) => p.name === '수진');
+  assert.ok(sujinRow.place_removed_at);
+  assert.equal(sujinRow.pickup.label, '버스정류장', 'the record of a finished trip is not deleted');
   const third = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
   const cleared = await rpc(db, 'get_trip', { p_code: third.code, p_device_key: device(1) });
   assert.equal(cleared.me.pickup, null, '내 장소 지우기 removes the kept place');
@@ -256,6 +290,18 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   assert.equal(cp.latest_trip, next.code);
   assert.equal(cp.month.trips, 2);
   assert.equal(Number(cp.month.my_amount), 4860);
+
+  // the x next to an address on the favourites screen removes the kept place right away
+  const members = (await rpc(db, 'get_driver', { p_driver_secret: driver_secret })).carpools[0].members;
+  const doyoon = members.find((m) => m.name === '도윤');
+  assert.equal(doyoon.pickup, '도윤 집');
+  const after = await rpc(db, 'remove_member_place', { p_carpool_code: carpool_code, p_secret: driver_secret,
+                                                       p_member_id: doyoon.id });
+  assert.equal(after.members.find((m) => m.name === '도윤').pickup, null);
+  const fourth = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
+  assert.equal((await rpc(db, 'get_trip', { p_code: fourth.code, p_device_key: device(2) })).me.pickup, null);
+  await assert.rejects(rpc(db, 'remove_member_place', { p_carpool_code: carpool_code, p_secret: 'someone-else',
+                                                        p_member_id: doyoon.id }), /not_allowed/);
 
   await assert.rejects(rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: 'someone-else' }),
                        /not_allowed/);
@@ -321,8 +367,8 @@ test('course shows the origin and my stops, hides others, the destination, and t
   assert.equal(view.progress.car, null, 'car position is no longer shared after boarding');
 
   // the same passenger opens the page on another phone
-  await assert.rejects(rpc(db, 'verify_device', { p_code: code, p_device_key: device(7), p_name: '태호', p_phone4: '0000' }),
-                       /verify_failed/);
+  const wrong = await rpc(db, 'verify_device', { p_code: code, p_device_key: device(7), p_name: '태호', p_phone4: '0000' });
+  assert.equal(wrong.error, 'verify_failed');
   view = await rpc(db, 'verify_device', { p_code: code, p_device_key: device(7), p_name: '태호', p_phone4: '5678' });
   assert.equal(view.me.name, '태호');
 
@@ -368,6 +414,44 @@ test('a full car refuses new passengers but lets members edit', async () => {
   await assert.rejects(rpc(db, 'join_trip', { p_code: code, p_device_key: device(2), p_name: '서연' }), /trip_full/);
   const v = await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지', p_dropoff: place('집') });
   assert.equal(v.seats_left, 0);
+});
+
+test('records are corrected, never deleted: a place removal during a trip and a re-settlement', async () => {
+  const db = await freshDb();
+  const { code, admin_secret } = await rpc(db, 'create_trip', { p_title: '출근' });
+  await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지', p_phone4: '1234',
+                               p_pickup: place('정류장'), p_dropoff: place('집') });
+  await rpc(db, 'set_trip_status', { p_code: code, p_admin_secret: admin_secret, p_status: 'in_progress' });
+
+  // approved while driving: the stops leave the route, so the car asks NaviHelper for the whole route again
+  await rpc(db, 'request_place_removal', { p_code: code, p_device_key: device(1) });
+  let admin = await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret });
+  const minji = admin.passengers[0];
+  assert.ok(minji.removal_requested_at);
+  admin = await rpc(db, 'resolve_place_removal', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji.id });
+  assert.equal(admin.passengers[0].pickup, null);
+  assert.equal(admin.passengers[0].dropoff, null);
+  assert.equal(admin.passengers[0].save_place, false);
+  await assert.rejects(rpc(db, 'resolve_place_removal', { p_code: code, p_admin_secret: admin_secret,
+                                                          p_passenger_id: minji.id }), /no_removal_request/);
+
+  // settling again keeps the result it replaces, with the reason
+  const payload = (amount) => ({ total: 5000, shares: [{ passenger_id: minji.id, name: '민지', amount }] });
+  await rpc(db, 'post_settlement', { p_code: code, p_admin_secret: admin_secret, p_payload: payload(3000) });
+  admin = await rpc(db, 'post_settlement', { p_code: code, p_admin_secret: admin_secret, p_payload: payload(2500),
+                                             p_reason: '내 장소 삭제 요청 승인' });
+  assert.equal(admin.settlement.shares[0].amount, 2500);
+  assert.equal(admin.revisions.length, 1);
+  assert.equal(admin.revisions[0].reason, '내 장소 삭제 요청 승인');
+  assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) })).corrections, 1);
+
+  // wrong digits are counted (not rolled back with an error) and lock the page after 20 tries
+  for (let i = 0; i < 20; i++) {
+    const r = await rpc(db, 'verify_device', { p_code: code, p_device_key: device(5), p_name: '민지', p_phone4: '0000' });
+    assert.equal(r.error, 'verify_failed');
+  }
+  await assert.rejects(rpc(db, 'verify_device', { p_code: code, p_device_key: device(5), p_name: '민지', p_phone4: '1234' }),
+                       /too_many_attempts/);
 });
 
 test('stops are cleared a day after the trip ends', async () => {

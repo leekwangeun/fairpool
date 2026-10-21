@@ -1,0 +1,150 @@
+import { useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { rpc, type SettlePage as Settle } from '../api';
+import { store } from '../store';
+import {
+  Amount,
+  AmountRow,
+  BatchPill,
+  Button,
+  Card,
+  DigitsInput,
+  ErrorText,
+  Field,
+  Page,
+  PayActions,
+  RideList,
+  TextInput,
+  josa,
+  usePolling,
+  won,
+} from '../ui';
+import iconLock from '../assets/figma/icon-lock.svg';
+
+// The one settlement page of a carpool folder batch, made when the driver presses 합쳐서 정산하기.
+// Everyone gets the same link or QR; each phone sees only its own rides and sum (M6 정산 중, M6-1 정산 완료).
+export default function SettlePage() {
+  const { code = '' } = useParams();
+  const deviceKey = store.deviceKey();
+  const [page, setPage] = useState<Settle | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      setPage(await rpc<Settle>('get_settle_page', { p_code: code, p_device_key: deviceKey }));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  usePolling(load);
+
+  if (error && !page) {
+    return (
+      <Page>
+        <Card>
+          <p className="t-body">{error}</p>
+        </Card>
+      </Page>
+    );
+  }
+  if (!page) return <Page>{null}</Page>;
+  if (!page.me) return <Verify page={page} deviceKey={deviceKey} onDone={setPage} />;
+
+  const me = page.me;
+  const done = page.status === 'done' || me.paid;
+  const amounts = me.rides.map((r) => r.amount);
+  const sameEach = amounts.length > 1 && amounts.every((a) => a === amounts[0]);
+  const first = me.rides[0];
+  const sameCourse = first?.from && first.to && me.rides.every((r) => r.from === first.from && r.to === first.to);
+  // totals of the rides this person was in: the rest of each trip is the driver's part and other riders'
+  const total = me.rides.reduce((sum, r) => sum + r.total, 0);
+  const driver = me.rides.reduce((sum, r) => sum + r.driver, 0);
+  const others = total - me.amount - driver;
+
+  return (
+    <Page gap={14}>
+      <Card className="gap-1">
+        <div className="flex items-center gap-2">
+          <p className="t-caption text-brand">
+            {done ? `${page.driver_name}님이 받았다고 확인했어요` : `${page.driver_name}님이 정산을 요청했어요`}
+          </p>
+          <BatchPill status={done ? 'done' : 'requested'} />
+        </div>
+        <p className="t-strong text-sub">
+          {page.name} {me.trips}회, {me.name} 분담액
+        </p>
+        <Amount value={me.amount} />
+        <p className="t-caption text-sub">
+          {sameEach ? `${me.trips}회 × ${won(amounts[0])}` : '회마다 금액이 달라요'}
+          {sameCourse && ` | ${first.from} → ${first.to}${first.km != null ? ` ${Math.round(first.km)}km` : ''}`}
+        </p>
+      </Card>
+
+      <Card className="gap-2.5">
+        <AmountRow strong label={`${me.trips}회 총비용`} amount={total} />
+        <AmountRow label={me.name} amount={me.amount} />
+        {driver > 0 && <AmountRow label="운전자 몫" amount={driver} />}
+        {others > 0 && <AmountRow label="함께 탄 다른 사람 몫" amount={others} />}
+      </Card>
+
+      <RideList title="운행별 내역" rides={me.rides} shown={3} />
+
+      {done ? (
+        <section className="flex w-full flex-col gap-1 rounded-[20px] bg-[#e3f7eb] px-[18px] py-4">
+          <p className="t-strong text-[#148f4d]">{josa(page.name, '은', '는')} 계속 이어져요</p>
+          <p className="t-caption text-sub">다음 {page.next_title ?? '운행'}부터 다시 0원에서 쌓여요</p>
+        </section>
+      ) : (
+        <PayActions
+          bank={page.bank}
+          onReport={(message) => rpc('report_settle_issue', { p_code: page.code, p_device_key: deviceKey, p_message: message })}
+        />
+      )}
+      <p className="t-caption text-center text-faint">
+        {done ? '정산이 끝나 계좌번호는 내려갔어요' : '내 은행 앱에서 보내 주세요. 페어풀은 송금하지 않아요'}
+      </p>
+    </Page>
+  );
+}
+
+// Opened on a phone that did not ride: the same QR works for everyone after name + last 4 digits.
+function Verify({ page, deviceKey, onDone }: { page: Settle; deviceKey: string; onDone: (p: Settle) => void }) {
+  const [name, setName] = useState(store.myName());
+  const [phone4, setPhone4] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  async function verify() {
+    setError(null);
+    try {
+      onDone(await rpc<Settle>('verify_settle_page', { p_code: page.code, p_device_key: deviceKey, p_name: name, p_phone4: phone4 }));
+      store.setMyName(name.trim());
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  return (
+    <Page>
+      <Card className="gap-[18px]">
+        <img src={iconLock} width={48} height={48} alt="" />
+        <div className="flex flex-col gap-1">
+          <h1 className="t-title">{page.name} 정산 페이지예요</h1>
+          <p className="t-body text-sub">
+            {page.driver_name}님이 보낸 페이지예요. 이름과 휴대폰 번호 뒤 4자리로 확인하면 내 내역과 분담액만 보여요
+          </p>
+        </div>
+        <Field label="이름">
+          <TextInput value={name} onChange={setName} />
+        </Field>
+        <Field label="휴대폰 번호 뒤 4자리">
+          <DigitsInput value={phone4} onChange={setPhone4} />
+        </Field>
+        <ErrorText error={error} />
+      </Card>
+      <div className="flex-1" />
+      <Button onClick={verify} disabled={!name.trim() || phone4.length !== 4}>
+        확인
+      </Button>
+    </Page>
+  );
+}

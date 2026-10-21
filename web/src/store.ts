@@ -70,3 +70,4 @@ export const baseUrl = (): string =>
 
 export const tripLink = (code: string) => `${baseUrl()}/t/${code}`;
 export const carpoolLink = (code: string) => `${baseUrl()}/c/${code}`;
+export const settleLink = (code: string) => `${baseUrl()}/s/${code}`;

@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router-dom';
 import { rpc, ruleName, type Place, type PublicTrip, type Stop } from '../api';
 import { store } from '../store';
 import {
-  AmountRow,
+  Amount,
   BatchPill,
   Button,
   Card,
@@ -16,9 +16,10 @@ import {
   Field,
   OptionCard,
   Page,
+  PayActions,
   PlaceSearch,
+  RideList,
   TextInput,
-  copyText,
   usePolling,
   won,
 } from '../ui';
@@ -32,7 +33,7 @@ import dotNext from '../assets/figma/dot-next.svg';
 
 // The page a passenger opens from the QR on the car screen or the link the driver sent.
 // M1 join, M1-1 another phone, M2 waiting for pickup, M2-1 riding, M3 settlement (바로 정산),
-// M5 / M6 / M6-1 a trip stacked into a carpool folder.
+// M5 a trip stacked into a carpool folder (요청 전; the settlement page is SettlePage).
 export default function PassengerTrip() {
   const { code = '' } = useParams();
   const deviceKey = store.deviceKey();
@@ -89,7 +90,14 @@ export default function PassengerTrip() {
       <Settled trip={trip} deviceKey={deviceKey} onChange={setTrip} />
     );
   }
-  return <Riding trip={trip} onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined} />;
+  return (
+    <Riding
+      trip={trip}
+      deviceKey={deviceKey}
+      onChange={setTrip}
+      onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined}
+    />
+  );
 }
 
 // ------------------------------------------------------------------ M1 참여
@@ -188,7 +196,7 @@ function Join({
         </Field>
         <p className="t-caption text-faint">
           {trip.carpool_code
-            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 지울 수 있어요'
+            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 운전자에게 삭제를 요청할 수 있어요'
             : '정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요'}
         </p>
       </Card>
@@ -297,7 +305,17 @@ function stopText(s: Stop, origin: string | null): { title: string; sub?: string
   }
 }
 
-function Riding({ trip, onEdit }: { trip: PublicTrip; onEdit?: () => void }) {
+function Riding({
+  trip,
+  deviceKey,
+  onChange,
+  onEdit,
+}: {
+  trip: PublicTrip;
+  deviceKey: string;
+  onChange: (t: PublicTrip) => void;
+  onEdit?: () => void;
+}) {
   const me = trip.me!;
   const stops: Stop[] = trip.progress?.stops ?? [
     { kind: 'start', label: trip.origin ?? undefined, state: 'next' },
@@ -397,6 +415,23 @@ function Riding({ trip, onEdit }: { trip: PublicTrip; onEdit?: () => void }) {
           탈 곳, 내릴 곳 바꾸기
         </button>
       )}
+      {me.removal_requested ? (
+        <p className="t-caption text-center text-sub">내 장소 삭제를 요청했어요. {trip.driver_name}님이 차에서 승인하면 지워져요</p>
+      ) : (
+        (me.pickup || me.dropoff) &&
+        !me.place_removed && (
+          <button
+            type="button"
+            onClick={async () => {
+              if (!window.confirm(`${trip.driver_name}님에게 내 장소 삭제를 요청할까요? 승인되면 남은 경로에서도 빠져요.`)) return;
+              onChange(await rpc<PublicTrip>('request_place_removal', { p_code: trip.code, p_device_key: deviceKey }));
+            }}
+            className="t-caption text-sub underline underline-offset-2"
+          >
+            내 장소 삭제 요청
+          </button>
+        )
+      )}
     </Page>
   );
 }
@@ -494,13 +529,19 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
         )}
       </Card>
 
-      <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
+      <PlaceRequest trip={trip} deviceKey={deviceKey} onChange={onChange} />
 
       {(hasPoint(me.pickup) || hasPoint(me.dropoff)) && (
         <CourseMap height={170} pickup={hasPoint(me.pickup) ? me.pickup : null} dropoff={hasPoint(me.dropoff) ? me.dropoff : null} />
       )}
 
-      <PayActions trip={trip} deviceKey={deviceKey} />
+      <PayActions
+        bank={trip.bank}
+        onReport={(message) => rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_message: message })}
+      />
+      {trip.corrections > 0 && (
+        <p className="t-caption text-center text-sub">운전자가 이 정산을 {trip.corrections}번 정정했어요. 지금 금액이 정정한 금액이에요</p>
+      )}
       <p className="t-caption text-center text-faint">
         {trip.paid
           ? '정산이 끝나 계좌번호는 내려갔어요'
@@ -512,192 +553,77 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
   );
 }
 
-// "정산에 문제가 있어요" and, while this passenger's settlement is in progress, "계좌번호 복사".
-function PayActions({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
-  const [copied, setCopied] = useState(false);
-  const [reported, setReported] = useState(false);
-
-  async function copyAccount() {
-    if (trip.bank && (await copyText(trip.bank.account))) {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    }
-  }
-
-  async function report() {
-    const message = window.prompt('어떤 점이 이상한가요? 운전자에게 전할게요', '정산에 문제가 있어요');
-    if (message === null) return;
-    await rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_message: message });
-    setReported(true);
-  }
-
-  return (
-    <>
-      <div className="flex w-full gap-2.5">
-        <Button variant="secondary" onClick={report} disabled={reported} className="flex-1">
-          {reported ? '운전자에게 알렸어요' : '정산에 문제가 있어요'}
-        </Button>
-        {trip.bank && (
-          <Button onClick={copyAccount} className="t-strong! flex-1">
-            {copied ? '복사했어요' : '계좌번호 복사'}
-          </Button>
-        )}
-      </div>
-      {copied && trip.bank && (
-        <p className="t-caption text-center text-sub">
-          {trip.bank.bank_name} {trip.bank.account} ({trip.bank.holder})
-        </p>
-      )}
-    </>
-  );
-}
-
-function SavedPlace({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+// "내 장소 삭제 요청": the passenger asks, the driver approves on the car screen. Trip records stay.
+function PlaceRequest({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
   const me = trip.me!;
-  if (!me.save_place || !trip.carpool_code) return null;
+  const places = [me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', ');
+  if (me.place_removed) {
+    return <p className="t-caption text-center text-sub">{trip.driver_name}님이 내 장소 삭제 요청을 승인했어요</p>;
+  }
+  if (!trip.carpool_code || !me.save_place || !places) return null;
 
-  async function forgetPlace() {
-    onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
+  async function ask() {
+    if (!window.confirm(`${trip.driver_name}님에게 내 장소 삭제를 요청할까요? 운전자가 승인하면 지워져요.`)) return;
+    onChange(await rpc<PublicTrip>('request_place_removal', { p_code: trip.code, p_device_key: deviceKey }));
   }
 
   return (
     <section className="flex w-full flex-col items-start gap-2 rounded-[20px] bg-brand-soft px-[18px] py-4">
       <p className="t-strong text-brand">{trip.driver_name}님 차에 내 장소가 저장됐어요</p>
       <p className="t-caption text-sub">
-        다음에 이 카풀로 운행하면 {josa([me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', '), '이', '가')} 바로
-        채워져요
+        {me.removal_requested
+          ? '삭제를 요청했어요. 운전자가 승인하면 지워지고, 이미 남은 운행 기록은 그대로예요'
+          : `다음에 이 카풀로 운행하면 ${josa(places, '이', '가')} 바로 채워져요`}
       </p>
-      <button type="button" onClick={forgetPlace} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
-        내 장소 지우기
-      </button>
+      {!me.removal_requested && (
+        <button type="button" onClick={ask} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
+          내 장소 삭제 요청
+        </button>
+      )}
     </section>
   );
 }
 
-// ------------------------------------------------------------------ M5, M6, M6-1 카풀 폴더
+// ------------------------------------------------------------------ M5 카풀 폴더 (요청 전)
 
+// Folder trips have no settlement page of their own. Until the driver presses 합쳐서 정산하기 the page
+// shows the running sum; after that it goes to the one settlement page of the batch (/s/<code>).
 function FolderView({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
   const f = trip.folder!;
-  const me = trip.me!;
-  const myDone = f.status === 'done' || !!f.payment?.paid;
-  const status = myDone ? 'done' : f.status;
+  if (f.page) return <Navigate to={`/s/${f.page}`} replace />;
   const amounts = f.rides.map((r) => r.amount);
   const sameEach = amounts.length > 1 && amounts.every((a) => a === amounts[0]);
-  const trips = f.payment?.trips ?? f.rides.length;
-  const amount = f.payment?.amount ?? f.my_total;
-
-  if (status === 'open') {
-    const today = f.rides.find((r) => r.is_this);
-    return (
-      <Page gap={14}>
-        <Card className="gap-1">
-          <div className="flex items-center gap-2">
-            <p className="t-caption text-brand">카풀 폴더 | {f.name}</p>
-            <BatchPill status="open" />
-          </div>
-          <p className="t-strong text-sub">
-            {f.name}: 지금까지 {f.rides.length}회
-          </p>
-          <Amount value={f.my_total} />
-          {today && (
-            <p className="t-caption text-sub">
-              {isToday(today.date) ? '오늘' : dayLabel(today.date)} {today.title} {won(today.amount)}이 더해졌어요
-            </p>
-          )}
-          <div className="w-full rounded-xl bg-brand-soft px-3.5 py-3">
-            <p className="t-caption text-brand">
-              {trip.driver_name}님이 합쳐서 정산하면 그때 한 번만 보내면 돼요. 지금은 보낼 필요 없어요
-            </p>
-          </div>
-        </Card>
-        <Rides title="쌓인 운행" rides={f.rides} shown={4} />
-        {sameEach && (
-          <Card className="gap-1">
-            <h2 className="t-strong">1회 분담액이 매번 같은 이유</h2>
-            <p className="t-caption text-sub">같은 길을 같은 사람과 다녀서 계산 결과가 같아요. 길이 달라지면 그날 금액도 달라져요</p>
-          </Card>
-        )}
-        <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
-      </Page>
-    );
-  }
-
-  const first = f.rides[0];
-  const sameCourse = first?.from && first.to && f.rides.every((r) => r.from === first.from && r.to === first.to);
+  const today = f.rides.find((r) => r.is_this);
   return (
     <Page gap={14}>
       <Card className="gap-1">
         <div className="flex items-center gap-2">
-          <p className="t-caption text-brand">
-            {myDone ? `${trip.driver_name}님이 받았다고 확인했어요` : `${trip.driver_name}님이 정산을 요청했어요`}
-          </p>
-          <BatchPill status={status} />
+          <p className="t-caption text-brand">카풀 폴더 | {f.name}</p>
+          <BatchPill status="open" />
         </div>
         <p className="t-strong text-sub">
-          {f.name} {trips}회, {me.name} 분담액
+          {f.name}: 지금까지 {f.rides.length}회
         </p>
-        <Amount value={amount} />
-        <p className="t-caption text-sub">
-          {sameEach ? `${trips}회 × ${won(amounts[0])}` : '회마다 금액이 달라요'}
-          {sameCourse && ` | ${first.from} → ${first.to}${first.km != null ? ` ${Math.round(first.km)}km` : ''}`}
-        </p>
+        <Amount value={f.my_total} />
+        {today && (
+          <p className="t-caption text-sub">
+            {isToday(today.date) ? '오늘' : dayLabel(today.date)} {today.title} {won(today.amount)}이 더해졌어요
+          </p>
+        )}
+        <div className="w-full rounded-xl bg-brand-soft px-3.5 py-3">
+          <p className="t-caption text-brand">
+            {trip.driver_name}님이 합쳐서 정산하면 그때 한 번만 보내면 돼요. 지금은 보낼 필요 없어요
+          </p>
+        </div>
       </Card>
-
-      {f.totals && (
-        <Card className="gap-2.5">
-          <AmountRow strong label={`${f.totals.trips}회 총비용`} amount={f.totals.total} />
-          {f.totals.people.map((p, i) => (
-            <AmountRow key={i} label={p.name} amount={p.amount} />
-          ))}
-          {f.totals.driver_amount > 0 && <AmountRow label="운전자 몫" amount={f.totals.driver_amount} />}
+      <RideList title="쌓인 운행" rides={f.rides} shown={4} />
+      {sameEach && (
+        <Card className="gap-1">
+          <h2 className="t-strong">1회 분담액이 매번 같은 이유</h2>
+          <p className="t-caption text-sub">같은 길을 같은 사람과 다녀서 계산 결과가 같아요. 길이 달라지면 그날 금액도 달라져요</p>
         </Card>
       )}
-
-      <Rides title="운행별 내역" rides={f.rides} shown={3} />
-
-      {myDone ? (
-        <section className="flex w-full flex-col gap-1 rounded-[20px] bg-[#e3f7eb] px-[18px] py-4">
-          <p className="t-strong text-[#148f4d]">{josa(f.name, '은', '는')} 계속 이어져요</p>
-          <p className="t-caption text-sub">다음 {trip.title}부터 다시 0원에서 쌓여요</p>
-        </section>
-      ) : (
-        <PayActions trip={trip} deviceKey={deviceKey} />
-      )}
-      <p className="t-caption text-center text-faint">
-        {myDone ? '정산이 끝나 계좌번호는 내려갔어요' : '내 은행 앱에서 보내 주세요. 페어풀은 송금하지 않아요'}
-      </p>
+      <PlaceRequest trip={trip} deviceKey={deviceKey} onChange={onChange} />
     </Page>
-  );
-}
-
-function Amount({ value }: { value: number }) {
-  return (
-    <div className="flex items-baseline gap-1">
-      <span className="t-number">{Math.round(value).toLocaleString('ko-KR')}</span>
-      <span className="t-headline text-sub">원</span>
-    </div>
-  );
-}
-
-// Newest rides first; the rest folds into "10월 1일 ~ 10월 8일 5회 더 보기".
-function Rides({ title, rides, shown }: { title: string; rides: { date: string; title: string; amount: number }[]; shown: number }) {
-  const [all, setAll] = useState(false);
-  const rest = rides.slice(shown);
-  const visible = all ? rides : rides.slice(0, shown);
-  return (
-    <Card className="gap-2.5">
-      <h2 className="t-strong">{title}</h2>
-      {visible.map((r, i) => (
-        <AmountRow key={i} label={`${dayLabel(r.date)} ${r.title}`} amount={r.amount} />
-      ))}
-      {!all && rest.length > 0 && (
-        <button type="button" onClick={() => setAll(true)} className="t-caption text-left text-brand">
-          {rest.length > 1
-            ? `${dayLabel(rest[rest.length - 1].date).split(' (')[0]} ~ ${dayLabel(rest[0].date).split(' (')[0]} `
-            : ''}
-          {rest.length}회 더 보기
-        </button>
-      )}
-    </Card>
   );
 }

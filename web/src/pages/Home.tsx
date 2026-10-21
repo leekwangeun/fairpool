@@ -60,6 +60,18 @@ export default function Home() {
     }
   }
 
+  // the x next to a kept address: the place for the next trip goes, trip records stay
+  async function removePlace(carpoolCode: string, memberId: string, memberName: string) {
+    if (!window.confirm(`즐겨찾기에 남긴 ${memberName} 님의 장소를 지울까요? 운행 기록은 그대로예요.`)) return;
+    setError(null);
+    try {
+      await rpc('remove_member_place', { p_carpool_code: carpoolCode, p_secret: store.driverSecret(), p_member_id: memberId });
+      setDriver(await rpc<Driver>('get_driver', { p_driver_secret: store.driverSecret() }));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   if (loading) return <Page>{null}</Page>;
 
   if (!driver) {
@@ -110,11 +122,30 @@ export default function Home() {
         <Card className="flex flex-col gap-3">
           <h2 className="t-strong">즐겨찾기</h2>
           {driver.carpools.map((c) => (
-            <div key={c.code} className="flex items-center justify-between gap-3">
-              <span className="truncate">{c.title}</span>
-              <button onClick={() => again(c.code)} className="shrink-0 rounded-lg bg-brand-soft px-3 py-2 text-sm font-semibold text-brand">
-                지난 운행 다시 만들기
-              </button>
+            <div key={c.code} className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="truncate">{c.title}</span>
+                <button onClick={() => again(c.code)} className="shrink-0 rounded-lg bg-brand-soft px-3 py-2 text-sm font-semibold text-brand">
+                  지난 운행 다시 만들기
+                </button>
+              </div>
+              {c.members
+                .filter((m) => m.pickup || m.dropoff)
+                .map((m) => (
+                  <div key={m.id} className="flex items-center gap-2 rounded-lg bg-page px-3 py-1.5">
+                    <span className="t-caption min-w-0 flex-1 truncate text-sub">
+                      {m.name} | {[m.pickup, m.dropoff].filter(Boolean).join(' → ')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removePlace(c.code, m.id, m.name)}
+                      aria-label={`${m.name} 장소 지우기`}
+                      className="t-strong shrink-0 px-1 text-faint"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
             </div>
           ))}
         </Card>

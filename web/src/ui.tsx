@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import QRCode from 'qrcode';
-import { demoMode, searchPlaces, type BatchStatus, type Place, type TripStatus } from './api';
+import { demoMode, searchPlaces, type Bank, type BatchStatus, type Place, type TripStatus } from './api';
 import glyph from './assets/figma/glyph.svg';
 import iconSearch from './assets/figma/icon-search.svg';
 import radioOff from './assets/figma/radio-off.svg';
@@ -312,6 +312,79 @@ export function AmountRow({ label, amount, strong }: { label: ReactNode; amount:
       <span className={`min-w-0 flex-1 ${strong ? '' : 'text-sub'}`}>{label}</span>
       <span className="shrink-0">{won(amount)}</span>
     </div>
+  );
+}
+
+// "9,720 원" in the Number style.
+export function Amount({ value }: { value: number }) {
+  return (
+    <div className="flex items-baseline gap-1">
+      <span className="t-number">{Math.round(value).toLocaleString('ko-KR')}</span>
+      <span className="t-headline text-sub">원</span>
+    </div>
+  );
+}
+
+// Newest rides first; the rest folds into "10월 1일 ~ 10월 8일 5회 더 보기".
+export function RideList({ title, rides, shown }: { title: string; rides: { date: string; title: string; amount: number }[]; shown: number }) {
+  const [all, setAll] = useState(false);
+  const rest = rides.slice(shown);
+  const visible = all ? rides : rides.slice(0, shown);
+  return (
+    <Card className="gap-2.5">
+      <h2 className="t-strong">{title}</h2>
+      {visible.map((r, i) => (
+        <AmountRow key={i} label={`${dayLabel(r.date)} ${r.title}`} amount={r.amount} />
+      ))}
+      {!all && rest.length > 0 && (
+        <button type="button" onClick={() => setAll(true)} className="t-caption text-left text-brand">
+          {rest.length > 1
+            ? `${dayLabel(rest[rest.length - 1].date).split(' (')[0]} ~ ${dayLabel(rest[0].date).split(' (')[0]} `
+            : ''}
+          {rest.length}회 더 보기
+        </button>
+      )}
+    </Card>
+  );
+}
+
+// "정산에 문제가 있어요" and, while this passenger's settlement is in progress, "계좌번호 복사".
+export function PayActions({ bank, onReport }: { bank: Bank | null; onReport: (message: string) => Promise<unknown> }) {
+  const [copied, setCopied] = useState(false);
+  const [reported, setReported] = useState(false);
+
+  async function copyAccount() {
+    if (bank && (await copyText(bank.account))) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
+  async function report() {
+    const message = window.prompt('어떤 점이 이상한가요? 운전자에게 전할게요', '정산에 문제가 있어요');
+    if (message === null) return;
+    await onReport(message);
+    setReported(true);
+  }
+
+  return (
+    <>
+      <div className="flex w-full gap-2.5">
+        <Button variant="secondary" onClick={report} disabled={reported} className="flex-1">
+          {reported ? '운전자에게 알렸어요' : '정산에 문제가 있어요'}
+        </Button>
+        {bank && (
+          <Button onClick={copyAccount} className="t-strong! flex-1">
+            {copied ? '복사했어요' : '계좌번호 복사'}
+          </Button>
+        )}
+      </div>
+      {copied && bank && (
+        <p className="t-caption text-center text-sub">
+          {bank.bank_name} {bank.account} ({bank.holder})
+        </p>
+      )}
+    </>
   );
 }
 

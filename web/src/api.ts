@@ -27,6 +27,8 @@ const messages: Record<string, string> = {
   batch_in_progress: '정산 중인 묶음이 끝나면 다시 요청할 수 있어요.',
   nothing_to_settle: '아직 쌓인 운행이 없어요.',
   no_request: '정산 중인 묶음이 없어요.',
+  no_removal_request: '장소 삭제 요청이 없어요.',
+  page_not_found: '정산 페이지를 찾을 수 없어요. 운전자가 정산 요청을 취소했을 수 있어요.',
 };
 
 export class ApiError extends Error {
@@ -36,20 +38,26 @@ export class ApiError extends Error {
 }
 
 export async function rpc<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
+  let data: unknown;
   try {
     if (supabase) {
-      const { data, error } = await supabase.rpc(fn, args);
-      if (error) throw error;
-      return data as T;
+      const res = await supabase.rpc(fn, args);
+      if (res.error) throw res.error;
+      data = res.data;
+    } else {
+      const { demoRpc } = await import('./demoDb');
+      data = await demoRpc(fn, args);
     }
-    const { demoRpc } = await import('./demoDb');
-    return (await demoRpc(fn, args)) as T;
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     const code = Object.keys(messages).find((k) => raw.includes(k)) ?? 'unknown';
     if (code === 'unknown') console.error(e);
     throw new ApiError(code);
   }
+  // failures that must not roll back (a wrong verification is still counted) come back as { error }
+  const failed = (data as { error?: unknown } | null)?.error;
+  if (typeof failed === 'string') throw new ApiError(failed);
+  return data as T;
 }
 
 // label: what people call it, area: district level ("서대문구 연희동") kept after the trip,
@@ -147,12 +155,15 @@ export type PublicTrip = {
     estimate: number | null;
     boarded: boolean;
     alighted: boolean;
+    removal_requested: boolean;
+    place_removed: boolean;
   } | null;
   progress: { car: { lat: number; lng: number } | null; stops: Stop[] } | null;
   settlement: Settlement | null;
   settle_mode: SettleMode | null;
   paid: boolean;
   folder: PassengerFolder | null;
+  corrections: number;
   bank: Bank | null;
 };
 
@@ -161,16 +172,33 @@ export type SettleMode = 'direct' | 'folder';
 // open: 요청 전, requested: 정산 중, done: 정산 완료
 export type BatchStatus = 'open' | 'requested' | 'done';
 
-// The folder a trip went into, as one passenger sees it (M5, M6, M6-1).
+// A trip stacked into a carpool folder, as one passenger sees it (M5). `page` is the settlement page
+// made at 합쳐서 정산하기 that this passenger should open instead.
 export type PassengerFolder = {
+  name: string;
+  status: BatchStatus;
+  page: string | null;
+  rides: { date: string; title: string; amount: number; is_this: boolean }[];
+  my_total: number;
+};
+
+// The one settlement page of a folder batch (M6, M6-1): only this phone's own rides and sum.
+export type SettlePage = {
+  code: string;
   name: string;
   status: BatchStatus;
   requested_at: string | null;
   done_at: string | null;
-  rides: { date: string; title: string; amount: number; is_this: boolean; from?: string; to?: string; km?: number }[];
-  my_total: number;
-  payment: { amount: number; trips: number; paid: boolean } | null;
-  totals: { total: number; trips: number; people: { name: string; amount: number; trips: number }[]; driver_amount: number } | null;
+  driver_name: string;
+  next_title: string | null;
+  me: {
+    name: string;
+    amount: number;
+    trips: number;
+    paid: boolean;
+    rides: { date: string; title: string; amount: number; from?: string; to?: string; km?: number; total: number; driver: number }[];
+  } | null;
+  bank: Bank | null;
 };
 
 export type BatchSummary = {
@@ -187,6 +215,8 @@ export type FolderAdmin = {
   name: string;
   requested: (BatchSummary & {
     requested_at: string;
+    code: string;
+    issues: { name: string | null; message: string; created_at: string }[];
     payments: { id: string; name: string; amount: number; trips: number; paid: boolean }[];
   }) | null;
   open: BatchSummary;
@@ -205,6 +235,8 @@ export type AdminPassenger = {
   boarded_at: string | null;
   alighted_at: string | null;
   paid_at: string | null;
+  removal_requested_at: string | null;
+  place_removed_at: string | null;
 };
 
 export type AdminTrip = {
@@ -223,16 +255,20 @@ export type AdminTrip = {
   folder: { code: string; name: string; status: BatchStatus } | null;
   folders: { code: string; name: string; trips: number; amount: number }[];
   suggested_folder: string | null;
+  revisions: { total: number | null; reason: string | null; replaced_at: string }[];
   issues: { name: string | null; message: string; created_at: string }[];
 };
 
 export type Driver = {
   display_name: string;
   bank: Bank | null;
-  carpools: { code: string; title: string }[];
+  carpools: { code: string; title: string; members: CarpoolMember[] }[];
   trips: { code: string; title: string; status: TripStatus; created_at: string }[];
   vehicles: number;
 };
+
+// A favourite's member and the places kept for its next trip (labels only).
+export type CarpoolMember = { id: string; name: string; pickup: string | null; dropoff: string | null };
 
 export const ruleName: Record<Rule, string> = {
   shapley: '섀플리 값',

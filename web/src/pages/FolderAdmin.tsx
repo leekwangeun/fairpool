@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { rpc, type BatchSummary, type FolderAdmin as Folder } from '../api';
-import { store, tripLink } from '../store';
-import { BatchPill, Button, Card, Checkbox, ErrorText, Page, copyText, dayLabel, usePolling, won } from '../ui';
+import { settleLink, store } from '../store';
+import { BatchPill, Button, Card, Checkbox, ErrorText, Page, QrImage, copyText, dayLabel, usePolling, won } from '../ui';
 
 // Driver view of one carpool folder, like the car screens L1-6 (요청 전) and L1-7 (정산 중):
 // the stacked trips, what each passenger owes, and the request / received buttons.
@@ -70,9 +70,9 @@ export default function FolderAdmin() {
     run(() => rpc<Folder>('mark_batch_paid', { ...args, p_payment_id: id, p_paid: paid }));
   }
 
-  // the newest trip page of the batch shows the request to everyone in it
+  // one settlement page for the whole batch; each phone sees only its own part
   async function share() {
-    const url = tripLink(batch.trips[0].code);
+    const url = settleLink(req!.code);
     const text = `${folder!.name} ${batch.trips.length}회 정산을 요청했어요. 내 분담액과 계좌번호를 확인해 주세요.`;
     if (navigator.share) await navigator.share({ title: '페어풀', text, url }).catch(() => undefined);
     else if (await copyText(url)) {
@@ -144,14 +144,38 @@ export default function FolderAdmin() {
           </div>
           <span className="t-headline shrink-0">{won(batch.driver_amount)}</span>
         </div>
-        <div className="rounded-xl bg-brand-soft px-3.5 py-3">
-          <p className="t-caption text-brand">
-            {req
-              ? '송금을 받은 사람부터 체크해 주세요. 체크하면 그 사람 페이지에서 계좌번호가 내려가고, 모두 받으면 0원부터 다시 쌓여요'
-              : '합쳐서 정산하면 동승자마다 자기 운행과 분담액만 담긴 페이지가 열려요. 카풀 이름과 동승자는 남고 금액만 비워 다음 운행을 쌓아요'}
-          </p>
-        </div>
+        {req ? (
+          <div className="flex items-center gap-3 rounded-xl bg-brand-soft p-3">
+            <span className="shrink-0 rounded-lg bg-card p-1.5">
+              <QrImage text={settleLink(req.code)} size={96} />
+            </span>
+            <div className="flex min-w-0 flex-col gap-1">
+              <p className="t-strong text-brand">동승자에게 보낼 QR</p>
+              <p className="t-caption text-sub">
+                같은 QR을 찍어도 이름과 휴대폰 번호 뒤 4자리로 확인해 각자 자기 내역과 분담액만 보여요
+              </p>
+              <p className="t-caption text-sub">송금을 받은 사람부터 정산 완료를 눌러 주세요</p>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-xl bg-brand-soft px-3.5 py-3">
+            <p className="t-caption text-brand">
+              합쳐서 정산하면 동승자마다 자기 운행과 분담액만 담긴 정산 페이지가 하나 만들어져요. 카풀 이름과 동승자는 남고 금액만 비워 다음 운행을 쌓아요
+            </p>
+          </div>
+        )}
       </Card>
+
+      {req && req.issues.length > 0 && (
+        <Card className="gap-2">
+          <h2 className="t-strong">동승자가 남긴 문제</h2>
+          {req.issues.map((i, n) => (
+            <p key={n} className="t-body">
+              <span className="text-sub">{i.name ?? '동승자'}</span> {i.message}
+            </p>
+          ))}
+        </Card>
+      )}
 
       <ErrorText error={error} />
       <div className="flex w-full gap-2.5">
