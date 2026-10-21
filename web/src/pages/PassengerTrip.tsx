@@ -3,9 +3,14 @@ import { Link, useParams } from 'react-router-dom';
 import { rpc, ruleName, type Place, type PublicTrip, type Stop } from '../api';
 import { store } from '../store';
 import {
+  AmountRow,
+  BatchPill,
   Button,
   Card,
   Chip,
+  dayLabel,
+  isToday,
+  josa,
   DigitsInput,
   ErrorText,
   Field,
@@ -26,7 +31,8 @@ import dotNow from '../assets/figma/dot-now.svg';
 import dotNext from '../assets/figma/dot-next.svg';
 
 // The page a passenger opens from the QR on the car screen or the link the driver sent.
-// M1 join, M1-1 another phone, M2 waiting for pickup, M2-1 riding, M3 settlement.
+// M1 join, M1-1 another phone, M2 waiting for pickup, M2-1 riding, M3 settlement (바로 정산),
+// M5 / M6 / M6-1 a trip stacked into a carpool folder.
 export default function PassengerTrip() {
   const { code = '' } = useParams();
   const deviceKey = store.deviceKey();
@@ -76,7 +82,13 @@ export default function PassengerTrip() {
     return <Join trip={trip} deviceKey={deviceKey} onDone={done} onVerify={() => setMode('verify')} />;
   }
   if (mode === 'edit' && open) return <Join trip={trip} deviceKey={deviceKey} onDone={done} onCancel={() => setMode('view')} />;
-  if (trip.status === 'settled') return <Settled trip={trip} deviceKey={deviceKey} onChange={setTrip} />;
+  if (trip.status === 'settled') {
+    return trip.folder ? (
+      <FolderView trip={trip} deviceKey={deviceKey} onChange={setTrip} />
+    ) : (
+      <Settled trip={trip} deviceKey={deviceKey} onChange={setTrip} />
+    );
+  }
   return <Riding trip={trip} onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined} />;
 }
 
@@ -403,31 +415,14 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
   const mine = s.shares.find((x) => x.is_me);
   const rule = s.rule ?? trip.rule;
   const withDriver = s.include_driver ?? trip.include_driver;
-  const [copied, setCopied] = useState(false);
-  const [reported, setReported] = useState(false);
-
-  async function copyAccount() {
-    if (trip.bank && (await copyText(trip.bank.account))) {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    }
-  }
-
-  async function report() {
-    const message = window.prompt('어떤 점이 이상한가요? 운전자에게 전할게요', '정산에 문제가 있어요');
-    if (message === null) return;
-    await rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_message: message });
-    setReported(true);
-  }
-
-  async function forgetPlace() {
-    onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
-  }
 
   return (
     <Page gap={14}>
       <Card className="gap-1">
-        <p className="t-caption text-brand">운행이 끝났어요 | {trip.title}</p>
+        <div className="flex items-center gap-2">
+          <p className="t-caption text-brand">운행이 끝났어요 | {trip.title}</p>
+          {trip.settle_mode === 'direct' && <BatchPill status={trip.paid ? 'done' : 'requested'} />}
+        </div>
         <p className="t-strong text-sub">내 몫</p>
         <div className="flex items-baseline gap-1">
           <span className="t-number">{mine ? Math.round(mine.amount).toLocaleString('ko-KR') : '-'}</span>
@@ -499,23 +494,45 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
         )}
       </Card>
 
-      {me.save_place && trip.carpool_code && (
-        <section className="flex w-full flex-col items-start gap-2 rounded-[20px] bg-brand-soft px-[18px] py-4">
-          <p className="t-strong text-brand">{trip.driver_name}님 차에 내 장소가 저장됐어요</p>
-          <p className="t-caption text-sub">
-            다음에 이 카풀로 운행하면 {[me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', ')}
-            {me.dropoff ? '가' : ''} 바로 채워져요
-          </p>
-          <button type="button" onClick={forgetPlace} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
-            내 장소 지우기
-          </button>
-        </section>
-      )}
+      <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
 
       {(hasPoint(me.pickup) || hasPoint(me.dropoff)) && (
         <CourseMap height={170} pickup={hasPoint(me.pickup) ? me.pickup : null} dropoff={hasPoint(me.dropoff) ? me.dropoff : null} />
       )}
 
+      <PayActions trip={trip} deviceKey={deviceKey} />
+      <p className="t-caption text-center text-faint">
+        {trip.paid
+          ? '정산이 끝나 계좌번호는 내려갔어요'
+          : trip.bank
+            ? '내 은행 앱에서 보내 주세요. 페어풀은 송금하지 않아요'
+            : '송금은 쓰시는 앱에서 해 주세요. 정확한 위치는 이미 지웠어요'}
+      </p>
+    </Page>
+  );
+}
+
+// "정산에 문제가 있어요" and, while this passenger's settlement is in progress, "계좌번호 복사".
+function PayActions({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
+  const [copied, setCopied] = useState(false);
+  const [reported, setReported] = useState(false);
+
+  async function copyAccount() {
+    if (trip.bank && (await copyText(trip.bank.account))) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
+  async function report() {
+    const message = window.prompt('어떤 점이 이상한가요? 운전자에게 전할게요', '정산에 문제가 있어요');
+    if (message === null) return;
+    await rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_message: message });
+    setReported(true);
+  }
+
+  return (
+    <>
       <div className="flex w-full gap-2.5">
         <Button variant="secondary" onClick={report} disabled={reported} className="flex-1">
           {reported ? '운전자에게 알렸어요' : '정산에 문제가 있어요'}
@@ -531,7 +548,156 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
           {trip.bank.bank_name} {trip.bank.account} ({trip.bank.holder})
         </p>
       )}
-      <p className="t-caption text-center text-faint">송금은 쓰시는 앱에서 해 주세요. 정확한 위치는 이미 지웠어요</p>
+    </>
+  );
+}
+
+function SavedPlace({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+  const me = trip.me!;
+  if (!me.save_place || !trip.carpool_code) return null;
+
+  async function forgetPlace() {
+    onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
+  }
+
+  return (
+    <section className="flex w-full flex-col items-start gap-2 rounded-[20px] bg-brand-soft px-[18px] py-4">
+      <p className="t-strong text-brand">{trip.driver_name}님 차에 내 장소가 저장됐어요</p>
+      <p className="t-caption text-sub">
+        다음에 이 카풀로 운행하면 {josa([me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', '), '이', '가')} 바로
+        채워져요
+      </p>
+      <button type="button" onClick={forgetPlace} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
+        내 장소 지우기
+      </button>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------ M5, M6, M6-1 카풀 폴더
+
+function FolderView({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+  const f = trip.folder!;
+  const me = trip.me!;
+  const myDone = f.status === 'done' || !!f.payment?.paid;
+  const status = myDone ? 'done' : f.status;
+  const amounts = f.rides.map((r) => r.amount);
+  const sameEach = amounts.length > 1 && amounts.every((a) => a === amounts[0]);
+  const trips = f.payment?.trips ?? f.rides.length;
+  const amount = f.payment?.amount ?? f.my_total;
+
+  if (status === 'open') {
+    const today = f.rides.find((r) => r.is_this);
+    return (
+      <Page gap={14}>
+        <Card className="gap-1">
+          <div className="flex items-center gap-2">
+            <p className="t-caption text-brand">카풀 폴더 | {f.name}</p>
+            <BatchPill status="open" />
+          </div>
+          <p className="t-strong text-sub">
+            {f.name}: 지금까지 {f.rides.length}회
+          </p>
+          <Amount value={f.my_total} />
+          {today && (
+            <p className="t-caption text-sub">
+              {isToday(today.date) ? '오늘' : dayLabel(today.date)} {today.title} {won(today.amount)}이 더해졌어요
+            </p>
+          )}
+          <div className="w-full rounded-xl bg-brand-soft px-3.5 py-3">
+            <p className="t-caption text-brand">
+              {trip.driver_name}님이 합쳐서 정산하면 그때 한 번만 보내면 돼요. 지금은 보낼 필요 없어요
+            </p>
+          </div>
+        </Card>
+        <Rides title="쌓인 운행" rides={f.rides} shown={4} />
+        {sameEach && (
+          <Card className="gap-1">
+            <h2 className="t-strong">1회 분담액이 매번 같은 이유</h2>
+            <p className="t-caption text-sub">같은 길을 같은 사람과 다녀서 계산 결과가 같아요. 길이 달라지면 그날 금액도 달라져요</p>
+          </Card>
+        )}
+        <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
+      </Page>
+    );
+  }
+
+  const first = f.rides[0];
+  const sameCourse = first?.from && first.to && f.rides.every((r) => r.from === first.from && r.to === first.to);
+  return (
+    <Page gap={14}>
+      <Card className="gap-1">
+        <div className="flex items-center gap-2">
+          <p className="t-caption text-brand">
+            {myDone ? `${trip.driver_name}님이 받았다고 확인했어요` : `${trip.driver_name}님이 정산을 요청했어요`}
+          </p>
+          <BatchPill status={status} />
+        </div>
+        <p className="t-strong text-sub">
+          {f.name} {trips}회, {me.name} 분담액
+        </p>
+        <Amount value={amount} />
+        <p className="t-caption text-sub">
+          {sameEach ? `${trips}회 × ${won(amounts[0])}` : '회마다 금액이 달라요'}
+          {sameCourse && ` | ${first.from} → ${first.to}${first.km != null ? ` ${Math.round(first.km)}km` : ''}`}
+        </p>
+      </Card>
+
+      {f.totals && (
+        <Card className="gap-2.5">
+          <AmountRow strong label={`${f.totals.trips}회 총비용`} amount={f.totals.total} />
+          {f.totals.people.map((p, i) => (
+            <AmountRow key={i} label={p.name} amount={p.amount} />
+          ))}
+          {f.totals.driver_amount > 0 && <AmountRow label="운전자 몫" amount={f.totals.driver_amount} />}
+        </Card>
+      )}
+
+      <Rides title="운행별 내역" rides={f.rides} shown={3} />
+
+      {myDone ? (
+        <section className="flex w-full flex-col gap-1 rounded-[20px] bg-[#e3f7eb] px-[18px] py-4">
+          <p className="t-strong text-[#148f4d]">{josa(f.name, '은', '는')} 계속 이어져요</p>
+          <p className="t-caption text-sub">다음 {trip.title}부터 다시 0원에서 쌓여요</p>
+        </section>
+      ) : (
+        <PayActions trip={trip} deviceKey={deviceKey} />
+      )}
+      <p className="t-caption text-center text-faint">
+        {myDone ? '정산이 끝나 계좌번호는 내려갔어요' : '내 은행 앱에서 보내 주세요. 페어풀은 송금하지 않아요'}
+      </p>
     </Page>
+  );
+}
+
+function Amount({ value }: { value: number }) {
+  return (
+    <div className="flex items-baseline gap-1">
+      <span className="t-number">{Math.round(value).toLocaleString('ko-KR')}</span>
+      <span className="t-headline text-sub">원</span>
+    </div>
+  );
+}
+
+// Newest rides first; the rest folds into "10월 1일 ~ 10월 8일 5회 더 보기".
+function Rides({ title, rides, shown }: { title: string; rides: { date: string; title: string; amount: number }[]; shown: number }) {
+  const [all, setAll] = useState(false);
+  const rest = rides.slice(shown);
+  const visible = all ? rides : rides.slice(0, shown);
+  return (
+    <Card className="gap-2.5">
+      <h2 className="t-strong">{title}</h2>
+      {visible.map((r, i) => (
+        <AmountRow key={i} label={`${dayLabel(r.date)} ${r.title}`} amount={r.amount} />
+      ))}
+      {!all && rest.length > 0 && (
+        <button type="button" onClick={() => setAll(true)} className="t-caption text-left text-brand">
+          {rest.length > 1
+            ? `${dayLabel(rest[rest.length - 1].date).split(' (')[0]} ~ ${dayLabel(rest[0].date).split(' (')[0]} `
+            : ''}
+          {rest.length}회 더 보기
+        </button>
+      )}
+    </Card>
   );
 }

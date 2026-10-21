@@ -20,6 +20,13 @@ const messages: Record<string, string> = {
   too_many_attempts: '확인을 너무 많이 시도했어요. 운전자에게 다시 초대해 달라고 해 주세요.',
   link_expired: '연결 코드가 만료됐어요. 차 화면에서 새 QR을 띄워 주세요.',
   carpool_not_found: '즐겨찾기 카풀을 찾을 수 없어요.',
+  folder_not_found: '카풀 폴더를 찾을 수 없어요.',
+  folder_required: '쌓을 카풀 폴더를 골라 주세요.',
+  not_settled: '정산 결과가 오면 고를 수 있어요.',
+  batch_locked: '이미 합쳐서 정산을 요청한 운행이라 바꿀 수 없어요.',
+  batch_in_progress: '정산 중인 묶음이 끝나면 다시 요청할 수 있어요.',
+  nothing_to_settle: '아직 쌓인 운행이 없어요.',
+  no_request: '정산 중인 묶음이 없어요.',
 };
 
 export class ApiError extends Error {
@@ -143,8 +150,50 @@ export type PublicTrip = {
   } | null;
   progress: { car: { lat: number; lng: number } | null; stops: Stop[] } | null;
   settlement: Settlement | null;
-  bank: { bank_name: string; account: string; holder: string } | null;
+  settle_mode: SettleMode | null;
+  paid: boolean;
+  folder: PassengerFolder | null;
+  bank: Bank | null;
 };
+
+export type Bank = { bank_name: string; account: string; holder: string };
+export type SettleMode = 'direct' | 'folder';
+// open: 요청 전, requested: 정산 중, done: 정산 완료
+export type BatchStatus = 'open' | 'requested' | 'done';
+
+// The folder a trip went into, as one passenger sees it (M5, M6, M6-1).
+export type PassengerFolder = {
+  name: string;
+  status: BatchStatus;
+  requested_at: string | null;
+  done_at: string | null;
+  rides: { date: string; title: string; amount: number; is_this: boolean; from?: string; to?: string; km?: number }[];
+  my_total: number;
+  payment: { amount: number; trips: number; paid: boolean } | null;
+  totals: { total: number; trips: number; people: { name: string; amount: number; trips: number }[]; driver_amount: number } | null;
+};
+
+export type BatchSummary = {
+  trips: { code: string; title: string; date: string; total: number; km: number | null;
+           shares: { name: string; role: string | null; amount: number }[] }[];
+  people: { name: string; amount: number; trips: number }[];
+  driver_amount: number;
+  receivable: number;
+  total: number;
+};
+
+export type FolderAdmin = {
+  code: string;
+  name: string;
+  requested: (BatchSummary & {
+    requested_at: string;
+    payments: { id: string; name: string; amount: number; trips: number; paid: boolean }[];
+  }) | null;
+  open: BatchSummary;
+  last_done: { done_at: string } | null;
+};
+
+export type FolderItem = { code: string; name: string; status: BatchStatus; trips: number; amount: number };
 
 export type AdminPassenger = {
   id: string;
@@ -155,6 +204,7 @@ export type AdminPassenger = {
   save_place: boolean;
   boarded_at: string | null;
   alighted_at: string | null;
+  paid_at: string | null;
 };
 
 export type AdminTrip = {
@@ -169,12 +219,16 @@ export type AdminTrip = {
   carpool_code: string | null;
   passengers: AdminPassenger[];
   settlement: Settlement | null;
+  settle_mode: SettleMode | null;
+  folder: { code: string; name: string; status: BatchStatus } | null;
+  folders: { code: string; name: string; trips: number; amount: number }[];
+  suggested_folder: string | null;
   issues: { name: string | null; message: string; created_at: string }[];
 };
 
 export type Driver = {
   display_name: string;
-  bank: { bank_name: string; account: string; holder: string } | null;
+  bank: Bank | null;
   carpools: { code: string; title: string }[];
   trips: { code: string; title: string; status: TripStatus; created_at: string }[];
   vehicles: number;

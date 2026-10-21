@@ -5,6 +5,12 @@
 
 create extension if not exists pgcrypto;
 
+-- Key for encrypting driver bank accounts. The private schema is not exposed through the API.
+create schema if not exists private;
+create table private.settings (name text primary key, value text not null);
+insert into private.settings values ('bank_key', encode(gen_random_bytes(32), 'hex'));
+revoke all on schema private from public;
+
 -- ---------------------------------------------------------------- helpers
 
 create or replace function public._hash(p text) returns text
@@ -31,6 +37,18 @@ begin
   return result;
 end $$;
 
+create or replace function public._enc(p text) returns bytea
+language sql volatile security definer set search_path = public, extensions as $$
+  select case when p is null then null
+              else pgp_sym_encrypt(p, (select value from private.settings where name = 'bank_key')) end
+$$;
+
+create or replace function public._dec(p bytea) returns text
+language sql stable security definer set search_path = public, extensions as $$
+  select case when p is null then null
+              else pgp_sym_decrypt(p, (select value from private.settings where name = 'bank_key')) end
+$$;
+
 -- ---------------------------------------------------------------- tables
 
 create table public.drivers (
@@ -38,9 +56,9 @@ create table public.drivers (
   secret_hash     text not null unique,
   display_name    text not null default '운전자',
   bank_name       text,
-  bank_account    text,
-  account_holder  text,
-  bank_consent_at timestamptz,          -- account is shown to passengers only after consent
+  bank_account    bytea,                 -- encrypted with _enc
+  account_holder  bytea,                 -- encrypted with _enc
+  bank_consent_at timestamptz,          -- shown only to passengers whose settlement is in progress
   created_at      timestamptz not null default now()
 );
 
@@ -54,6 +72,39 @@ create table public.vehicles (
   revoked_at      timestamptz
 );
 
+-- 카풀 폴더: trips are stacked into the open batch, then settled together.
+-- A batch goes open (요청 전) -> requested (정산 중) -> done (정산 완료); the folder keeps its
+-- name and starts a new open batch.
+create table public.folders (
+  id          uuid primary key default gen_random_uuid(),
+  code        text not null unique,
+  driver_id   uuid references public.drivers(id) on delete cascade,
+  vehicle_id  uuid references public.vehicles(id) on delete set null,
+  name        text not null,
+  created_at  timestamptz not null default now(),
+  archived_at timestamptz
+);
+
+create table public.folder_batches (
+  id           uuid primary key default gen_random_uuid(),
+  folder_id    uuid not null references public.folders(id) on delete cascade,
+  status       text not null default 'open' check (status in ('open', 'requested', 'done')),
+  created_at   timestamptz not null default now(),
+  requested_at timestamptz,
+  done_at      timestamptz
+);
+
+-- What each passenger owes for a requested batch, fixed when the driver asks for it.
+create table public.batch_payments (
+  id              uuid primary key default gen_random_uuid(),
+  batch_id        uuid not null references public.folder_batches(id) on delete cascade,
+  device_key_hash text not null,
+  name            text not null,
+  amount          numeric not null,
+  trips           int not null,
+  paid_at         timestamptz
+);
+
 -- A saved regular carpool: "make the last trip again" and a stable link passengers keep.
 create table public.carpools (
   id             uuid primary key default gen_random_uuid(),
@@ -65,6 +116,7 @@ create table public.carpools (
   include_driver boolean not null default true,
   seats          int not null default 4,
   rule           text not null default 'shapley',
+  folder_id      uuid references public.folders(id) on delete set null,  -- folder its trips go to
   created_at     timestamptz not null default now(),
   archived_at    timestamptz
 );
@@ -100,6 +152,9 @@ create table public.trips (
   -- live course posted by the car: {stops:[{kind, passenger_id, label, area, time, eta_min,
   -- distance_km, state}], car:{lat,lng}}; filtered per passenger in get_trip
   progress       jsonb,
+  -- after settlement: 'direct' (바로 정산) or 'folder' (stacked into batch_id)
+  settle_mode    text check (settle_mode in ('direct', 'folder')),
+  batch_id       uuid references public.folder_batches(id) on delete set null,
   verify_fails   int not null default 0,
   created_at     timestamptz not null default now(),
   started_at     timestamptz,
@@ -120,6 +175,7 @@ create table public.trip_passengers (
   joined_at       timestamptz not null default now(),
   boarded_at      timestamptz,
   alighted_at     timestamptz,
+  paid_at         timestamptz,           -- 바로 정산: the driver confirmed this passenger paid
   unique (trip_id, device_key_hash)
 );
 
@@ -145,6 +201,8 @@ create index on public.trips (driver_id, created_at desc);
 create index on public.trips (carpool_id, created_at desc);
 create index on public.trip_passengers (trip_id);
 create index on public.trip_issues (trip_id);
+create index on public.trips (batch_id);
+create index on public.folder_batches (folder_id, created_at desc);
 
 alter table public.drivers         enable row level security;
 alter table public.vehicles        enable row level security;
@@ -154,6 +212,9 @@ alter table public.trips           enable row level security;
 alter table public.trip_passengers enable row level security;
 alter table public.settlements     enable row level security;
 alter table public.trip_issues     enable row level security;
+alter table public.folders         enable row level security;
+alter table public.folder_batches  enable row level security;
+alter table public.batch_payments  enable row level security;
 
 -- ---------------------------------------------------------------- internal lookups
 
@@ -204,7 +265,7 @@ create or replace function public._passengers_admin(p_trip uuid) returns jsonb
 language sql stable set search_path = public, extensions as $$
   select coalesce(jsonb_agg(jsonb_build_object(
            'id', id, 'name', name, 'pickup', pickup, 'dropoff', dropoff, 'seat', seat,
-           'save_place', save_place, 'estimate', estimate,
+           'save_place', save_place, 'estimate', estimate, 'paid_at', paid_at,
            'joined_at', joined_at, 'boarded_at', boarded_at, 'alighted_at', alighted_at)
          order by joined_at), '[]'::jsonb)
   from public.trip_passengers where trip_id = p_trip
@@ -270,7 +331,7 @@ begin
   return jsonb_build_object(
     'display_name', d.display_name,
     'bank', case when d.bank_consent_at is null then null else jsonb_build_object(
-      'bank_name', d.bank_name, 'account', d.bank_account, 'holder', d.account_holder) end,
+      'bank_name', d.bank_name, 'account', public._dec(d.bank_account), 'holder', public._dec(d.account_holder)) end,
     'carpools', (select coalesce(jsonb_agg(jsonb_build_object('code', c.code, 'title', c.title)
                    order by c.created_at desc), '[]'::jsonb)
                  from public.carpools c where c.driver_id = d.id and c.archived_at is null),
@@ -298,8 +359,10 @@ begin
   update public.drivers set
     display_name    = coalesce(nullif(trim(p_display_name), ''), display_name),
     bank_name       = case when p_bank_consent is false then null else coalesce(p_bank_name, bank_name) end,
-    bank_account    = case when p_bank_consent is false then null else coalesce(p_bank_account, bank_account) end,
-    account_holder  = case when p_bank_consent is false then null else coalesce(p_account_holder, account_holder) end,
+    bank_account    = case when p_bank_consent is false then null
+                           when p_bank_account is not null then public._enc(p_bank_account) else bank_account end,
+    account_holder  = case when p_bank_consent is false then null
+                           when p_account_holder is not null then public._enc(p_account_holder) else account_holder end,
     bank_consent_at = case when p_bank_consent is true then coalesce(bank_consent_at, now())
                            when p_bank_consent is false then null else bank_consent_at end
   where id = d.id;
@@ -378,10 +441,20 @@ begin
             'alighted', me.alighted_at is not null) end,
     'progress', public._progress_for(t.progress, me),
     'settlement', public._settlement_for(s.payload, me),
-    -- the account is shown only to people who actually rode, after the trip is settled
-    'bank', case when t.status = 'settled' and me.id is not null and d.bank_consent_at is not null
-              then jsonb_build_object('bank_name', d.bank_name, 'account', d.bank_account,
-                                      'holder', d.account_holder) end);
+    'settle_mode', t.settle_mode,
+    'paid', me.paid_at is not null,
+    'folder', public._folder_for(t, me),
+    -- the account is shown only while this passenger's settlement is in progress (정산 중):
+    -- 바로 정산 until the driver marks them paid, or a requested folder batch until their part is paid
+    'bank', case when me.id is not null and d.bank_consent_at is not null and (
+                   (t.status = 'settled' and t.settle_mode = 'direct' and me.paid_at is null)
+                   or exists (select 1 from public.folder_batches tb
+                              join public.folder_batches b on b.folder_id = tb.folder_id
+                              join public.batch_payments bp on bp.batch_id = b.id
+                              where tb.id = t.batch_id and b.status = 'requested'
+                                and bp.device_key_hash = me.device_key_hash and bp.paid_at is null))
+              then jsonb_build_object('bank_name', d.bank_name, 'account', public._dec(d.bank_account),
+                                      'holder', public._dec(d.account_holder)) end);
 end $$;
 
 create or replace function public.join_trip(
@@ -505,6 +578,22 @@ begin
     'passengers', public._passengers_admin(t.id),
     'progress', t.progress,
     'settlement', (select payload from public.settlements where trip_id = t.id),
+    'settle_mode', t.settle_mode,
+    'folder', (select jsonb_build_object('code', f.code, 'name', f.name, 'status', b.status)
+               from public.folder_batches b join public.folders f on f.id = b.folder_id where b.id = t.batch_id),
+    -- folders this trip can be stacked into, the carpool's own folder first, with what is piled up
+    'folders', (select coalesce(jsonb_agg(jsonb_build_object('code', f.code, 'name', f.name,
+                  'trips', jsonb_array_length(sm.summary -> 'trips'), 'amount', sm.summary -> 'receivable')
+                  order by (f.id = c.folder_id) desc nulls last, f.created_at desc), '[]'::jsonb)
+                from public.folders f left join public.carpools c on c.id = t.carpool_id
+                left join lateral (select id from public.folder_batches where folder_id = f.id and status = 'open'
+                                   order by created_at desc limit 1) o on true
+                cross join lateral (select public._batch_summary(o.id) as summary) sm
+                where f.archived_at is null
+                  and ((t.driver_id is not null and f.driver_id = t.driver_id)
+                       or (t.vehicle_id is not null and f.vehicle_id = t.vehicle_id))),
+    'suggested_folder', (select f.code from public.carpools c join public.folders f on f.id = c.folder_id
+                         where c.id = t.carpool_id and f.archived_at is null),
     'issues', (select coalesce(jsonb_agg(jsonb_build_object('message', i.message, 'created_at', i.created_at,
                  'name', (select name from public.trip_passengers p where p.id = i.passenger_id))
                  order by i.created_at), '[]'::jsonb)
@@ -577,6 +666,287 @@ begin
                'lat', round((dropoff ->> 'lat')::numeric, 2), 'lng', round((dropoff ->> 'lng')::numeric, 2)) else dropoff end
   where trip_id = t.id;
   return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
+-- ---------------------------------------------------------------- 바로 정산 / 카풀 폴더
+
+-- The folder's owner: its driver (driver secret or a car linked to that driver) or the car that made it.
+create or replace function public._folder_admin(p_code text, p_secret text) returns public.folders
+language plpgsql stable set search_path = public, extensions as $$
+declare
+  f public.folders;
+  d public.drivers := public._driver(p_secret);
+  v public.vehicles := public._vehicle(p_secret);
+begin
+  select * into f from public.folders where code = upper(p_code) and archived_at is null;
+  if f.id is null then raise exception 'folder_not_found'; end if;
+  if (d.id is not null and d.id = f.driver_id)
+     or (v.id is not null and (v.id = f.vehicle_id or (f.driver_id is not null and v.driver_id = f.driver_id))) then
+    return f;
+  end if;
+  raise exception 'not_allowed';
+end $$;
+
+create or replace function public._open_batch(p_folder uuid) returns uuid
+language plpgsql volatile set search_path = public, extensions as $$
+declare b uuid;
+begin
+  select id into b from public.folder_batches where folder_id = p_folder and status = 'open'
+  order by created_at desc limit 1;
+  if b is null then
+    insert into public.folder_batches (folder_id) values (p_folder) returning id into b;
+  end if;
+  return b;
+end $$;
+
+-- Totals of one batch: every trip, each passenger's sum (matched across trips by device), the driver's part.
+create or replace function public._batch_summary(p_batch uuid) returns jsonb
+language sql stable set search_path = public, extensions as $$
+  with shares as (
+    select t.id as trip_id, x ->> 'role' as role, (x ->> 'amount')::numeric as amount,
+           p.device_key_hash, p.name
+    from public.trips t
+    join public.settlements st on st.trip_id = t.id
+    cross join lateral jsonb_array_elements(st.payload -> 'shares') x
+    left join public.trip_passengers p on p.id::text = x ->> 'passenger_id'
+    where t.batch_id = p_batch
+  )
+  select jsonb_build_object(
+    'trips', (select coalesce(jsonb_agg(jsonb_build_object(
+                'code', t.code, 'title', t.title, 'date', coalesce(t.ended_at, t.created_at),
+                'total', (st.payload ->> 'total')::numeric,
+                'km', st.payload #> '{fuel,distance_km}',
+                'shares', (select coalesce(jsonb_agg(jsonb_build_object('name', x ->> 'name',
+                             'role', x ->> 'role', 'amount', (x ->> 'amount')::numeric) order by ord), '[]'::jsonb)
+                           from jsonb_array_elements(st.payload -> 'shares') with ordinality as y(x, ord)))
+                order by coalesce(t.ended_at, t.created_at) desc), '[]'::jsonb)
+              from public.trips t join public.settlements st on st.trip_id = t.id
+              where t.batch_id = p_batch),
+    'people', (select coalesce(jsonb_agg(jsonb_build_object('name', name, 'amount', amount, 'trips', n)
+                 order by name), '[]'::jsonb)
+               from (select max(name) as name, sum(amount) as amount, count(distinct trip_id) as n
+                     from shares where role is distinct from 'driver' and device_key_hash is not null
+                     group by device_key_hash) g),
+    'driver_amount', (select coalesce(sum(amount), 0) from shares where role = 'driver'),
+    'receivable', (select coalesce(sum(amount), 0) from shares
+                   where role is distinct from 'driver' and device_key_hash is not null),
+    'total', (select coalesce(sum((st.payload ->> 'total')::numeric), 0)
+              from public.trips t join public.settlements st on st.trip_id = t.id where t.batch_id = p_batch))
+$$;
+
+-- What one passenger sees about the folder a trip went into (M5, M6, M6-1): their own rides and
+-- sums; the batch totals only once the driver asked for settlement. A requested batch this passenger
+-- has not paid yet comes first, so the newest trip link (and the favourite link) still shows it.
+create or replace function public._folder_for(t public.trips, me public.trip_passengers) returns jsonb
+language plpgsql stable set search_path = public, extensions as $$
+declare
+  b public.folder_batches;
+  unpaid public.folder_batches;
+  f public.folders;
+  pay public.batch_payments;
+  rides jsonb;
+  summary jsonb;
+begin
+  if t.batch_id is null or me.id is null then return null; end if;
+  select * into b from public.folder_batches where id = t.batch_id;
+  select r.* into unpaid from public.folder_batches r
+  join public.batch_payments bp on bp.batch_id = r.id
+  where r.folder_id = b.folder_id and r.status = 'requested' and r.id <> b.id
+    and bp.device_key_hash = me.device_key_hash and bp.paid_at is null
+  limit 1;
+  if unpaid.id is not null then b := unpaid; end if;
+  select * into f from public.folders where id = b.folder_id;
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'date', coalesce(t2.ended_at, t2.created_at), 'title', t2.title,
+           'amount', (x ->> 'amount')::numeric, 'is_this', t2.id = t.id,
+           'from', x ->> 'from', 'to', x ->> 'to', 'km', x -> 'km')
+           order by coalesce(t2.ended_at, t2.created_at) desc), '[]'::jsonb)
+    into rides
+  from public.trips t2
+  join public.settlements st on st.trip_id = t2.id
+  join public.trip_passengers p on p.trip_id = t2.id and p.device_key_hash = me.device_key_hash
+  cross join lateral jsonb_array_elements(st.payload -> 'shares') x
+  where t2.batch_id = b.id and x ->> 'passenger_id' = p.id::text;
+  select * into pay from public.batch_payments where batch_id = b.id and device_key_hash = me.device_key_hash;
+  if b.status <> 'open' then
+    summary := public._batch_summary(b.id);
+  end if;
+  return jsonb_build_object(
+    'name', f.name, 'status', b.status, 'requested_at', b.requested_at, 'done_at', b.done_at,
+    'rides', rides,
+    'my_total', (select coalesce(sum((r ->> 'amount')::numeric), 0) from jsonb_array_elements(rides) r),
+    'payment', case when pay.id is null then null
+                    else jsonb_build_object('amount', pay.amount, 'trips', pay.trips, 'paid', pay.paid_at is not null) end,
+    'totals', case when summary is null then null
+                   else jsonb_build_object('total', summary -> 'total', 'trips', jsonb_array_length(summary -> 'trips'),
+                                           'people', summary -> 'people',
+                                           'driver_amount', summary -> 'driver_amount') end);
+end $$;
+
+-- At the arrival screen (L6): settle this trip now (바로 정산) or stack it into a folder.
+create or replace function public.choose_settlement(
+  p_code text, p_admin_secret text, p_mode text,
+  p_folder_code text default null, p_new_folder text default null
+) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  t public.trips := public._trip_admin(p_code, p_admin_secret);
+  f public.folders;
+  fc text;
+begin
+  if t.status <> 'settled' then raise exception 'not_settled'; end if;
+  if t.batch_id is not null
+     and (select status from public.folder_batches where id = t.batch_id) <> 'open' then
+    raise exception 'batch_locked';
+  end if;
+  if p_mode = 'direct' then
+    update public.trips set settle_mode = 'direct', batch_id = null where id = t.id;
+  elsif p_mode = 'folder' then
+    if p_folder_code is not null then
+      select * into f from public.folders
+      where code = upper(p_folder_code) and archived_at is null
+        and ((t.driver_id is not null and driver_id = t.driver_id) or (t.vehicle_id is not null and vehicle_id = t.vehicle_id));
+      if f.id is null then raise exception 'folder_not_found'; end if;
+    elsif nullif(trim(p_new_folder), '') is not null then
+      loop
+        fc := public._code(8);
+        exit when not exists (select 1 from public.folders where code = fc);
+      end loop;
+      insert into public.folders (code, driver_id, vehicle_id, name)
+      values (fc, t.driver_id, t.vehicle_id, trim(p_new_folder)) returning * into f;
+    else
+      raise exception 'folder_required';
+    end if;
+    update public.trips set settle_mode = 'folder', batch_id = public._open_batch(f.id) where id = t.id;
+    update public.trip_passengers set paid_at = null where trip_id = t.id;
+    -- favourites remember their folder, so the next trip of this carpool has it pre-selected
+    update public.carpools set folder_id = f.id where id = t.carpool_id;
+  else
+    raise exception 'bad_mode';
+  end if;
+  return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
+-- 바로 정산: the driver ticks a passenger as paid; their page then hides the account.
+create or replace function public.mark_paid(p_code text, p_admin_secret text, p_passenger_id uuid,
+                                            p_paid boolean default true) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare t public.trips := public._trip_admin(p_code, p_admin_secret);
+begin
+  if t.settle_mode is distinct from 'direct' then raise exception 'not_direct'; end if;
+  update public.trip_passengers set paid_at = case when p_paid then coalesce(paid_at, now()) end
+  where id = p_passenger_id and trip_id = t.id;
+  return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
+-- 카풀 폴더 list: name, state and what has piled up ("출근 카풀 [요청 전] 9회 21,870원").
+create or replace function public.list_folders(p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  d public.drivers := public._driver(p_secret);
+  v public.vehicles := public._vehicle(p_secret);
+begin
+  if d.id is null and v.id is null then raise exception 'not_allowed'; end if;
+  return (select coalesce(jsonb_agg(item order by created_at desc), '[]'::jsonb) from (
+    select f.created_at, jsonb_build_object(
+      'code', f.code, 'name', f.name,
+      'status', case when r.id is not null then 'requested' else 'open' end,
+      'trips', jsonb_array_length(sm.summary -> 'trips'),
+      'amount', sm.summary -> 'receivable') as item
+    from public.folders f
+    left join lateral (select id from public.folder_batches where folder_id = f.id and status = 'requested'
+                       order by created_at desc limit 1) r on true
+    left join lateral (select id from public.folder_batches where folder_id = f.id and status = 'open'
+                       order by created_at desc limit 1) o on true
+    cross join lateral (select public._batch_summary(coalesce(r.id, o.id)) as summary) sm
+    where f.archived_at is null
+      and ((d.id is not null and f.driver_id = d.id)
+           or (v.id is not null and (f.vehicle_id = v.id or (v.driver_id is not null and f.driver_id = v.driver_id))))
+  ) x);
+end $$;
+
+-- One folder for the driver (L1-6, L1-7): the batch being settled, if any, and the open one.
+create or replace function public.get_folder_admin(p_folder_code text, p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  f public.folders := public._folder_admin(p_folder_code, p_secret);
+  r public.folder_batches;
+  o uuid := public._open_batch(f.id);
+begin
+  select * into r from public.folder_batches where folder_id = f.id and status = 'requested'
+  order by created_at desc limit 1;
+  return jsonb_build_object(
+    'code', f.code, 'name', f.name,
+    'requested', case when r.id is null then null else public._batch_summary(r.id) || jsonb_build_object(
+      'requested_at', r.requested_at,
+      'payments', (select coalesce(jsonb_agg(jsonb_build_object('id', id, 'name', name, 'amount', amount,
+                     'trips', trips, 'paid', paid_at is not null) order by name), '[]'::jsonb)
+                   from public.batch_payments where batch_id = r.id)) end,
+    'open', public._batch_summary(o),
+    'last_done', (select jsonb_build_object('done_at', done_at) from public.folder_batches
+                  where folder_id = f.id and status = 'done' order by done_at desc limit 1));
+end $$;
+
+-- 합쳐서 정산하기: fix every passenger's sum and show it (with the account) on their pages.
+-- New trips keep stacking into a fresh open batch meanwhile.
+create or replace function public.request_batch(p_folder_code text, p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  f public.folders := public._folder_admin(p_folder_code, p_secret);
+  o uuid := public._open_batch(f.id);
+begin
+  if exists (select 1 from public.folder_batches where folder_id = f.id and status = 'requested') then
+    raise exception 'batch_in_progress';
+  end if;
+  if not exists (select 1 from public.trips where batch_id = o) then raise exception 'nothing_to_settle'; end if;
+  insert into public.batch_payments (batch_id, device_key_hash, name, amount, trips)
+  select o, p.device_key_hash, max(p.name), sum((x ->> 'amount')::numeric), count(distinct t.id)
+  from public.trips t
+  join public.settlements st on st.trip_id = t.id
+  cross join lateral jsonb_array_elements(st.payload -> 'shares') x
+  join public.trip_passengers p on p.id::text = x ->> 'passenger_id'
+  where t.batch_id = o
+  group by p.device_key_hash;
+  update public.folder_batches set status = 'requested', requested_at = now() where id = o;
+  insert into public.folder_batches (folder_id) values (f.id);
+  return public.get_folder_admin(p_folder_code, p_secret);
+end $$;
+
+-- 정산 요청 취소: back to 요청 전, and trips stacked since then join it again.
+create or replace function public.cancel_batch_request(p_folder_code text, p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  f public.folders := public._folder_admin(p_folder_code, p_secret);
+  r uuid;
+begin
+  select id into r from public.folder_batches where folder_id = f.id and status = 'requested'
+  order by created_at desc limit 1;
+  if r is null then raise exception 'no_request'; end if;
+  update public.trips set batch_id = r
+  where batch_id in (select id from public.folder_batches where folder_id = f.id and status = 'open');
+  delete from public.folder_batches where folder_id = f.id and status = 'open';
+  delete from public.batch_payments where batch_id = r;
+  update public.folder_batches set status = 'open', requested_at = null where id = r;
+  return public.get_folder_admin(p_folder_code, p_secret);
+end $$;
+
+-- The driver ticks a passenger's sum as received; when everyone is ticked the batch is done.
+create or replace function public.mark_batch_paid(p_folder_code text, p_secret text, p_payment_id uuid,
+                                                  p_paid boolean default true) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  f public.folders := public._folder_admin(p_folder_code, p_secret);
+  r uuid;
+begin
+  select id into r from public.folder_batches where folder_id = f.id and status = 'requested'
+  order by created_at desc limit 1;
+  if r is null then raise exception 'no_request'; end if;
+  update public.batch_payments set paid_at = case when p_paid then coalesce(paid_at, now()) end
+  where id = p_payment_id and batch_id = r;
+  if not exists (select 1 from public.batch_payments where batch_id = r and paid_at is null) then
+    update public.folder_batches set status = 'done', done_at = now() where id = r;
+  end if;
+  return public.get_folder_admin(p_folder_code, p_secret);
 end $$;
 
 -- ---------------------------------------------------------------- regular carpools
@@ -766,6 +1136,8 @@ declare
     'create_driver', 'update_driver', 'get_driver',
     'create_trip', 'get_trip', 'join_trip', 'verify_device', 'leave_trip', 'forget_my_place', 'report_issue',
     'get_trip_admin', 'set_trip_status', 'update_progress', 'mark_passenger', 'post_settlement',
+    'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
+    'cancel_batch_request', 'mark_batch_paid',
     'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool',
     'create_vehicle_link', 'claim_vehicle_link', 'get_vehicle_trips', 'revoke_vehicle'];
 begin

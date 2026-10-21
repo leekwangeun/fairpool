@@ -9,6 +9,7 @@ import PassengerTrip from './pages/PassengerTrip';
 import CarpoolLink from './pages/CarpoolLink';
 import VehicleLink from './pages/VehicleLink';
 import Settings from './pages/Settings';
+import FolderAdmin from './pages/FolderAdmin';
 import HowItWorks from './pages/HowItWorks';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -22,6 +23,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <Route path="/t/:code/how" element={<HowItWorks />} />
         <Route path="/c/:code" element={<CarpoolLink />} />
         <Route path="/link/:code" element={<VehicleLink />} />
+        <Route path="/f/:code" element={<FolderAdmin />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Home />} />
       </Routes>

@@ -2,12 +2,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import QRCode from 'qrcode';
-import { demoMode, searchPlaces, type Place, type TripStatus } from './api';
+import { demoMode, searchPlaces, type BatchStatus, type Place, type TripStatus } from './api';
 import glyph from './assets/figma/glyph.svg';
 import iconSearch from './assets/figma/icon-search.svg';
 import radioOff from './assets/figma/radio-off.svg';
 import radioOn from './assets/figma/radio-on.svg';
 import checkboxOff from './assets/figma/checkbox-off.svg';
+import checkboxOn from './assets/figma/checkbox-on.svg';
 
 export function Brand({ right }: { right?: ReactNode }) {
   return (
@@ -27,7 +28,17 @@ export function Brand({ right }: { right?: ReactNode }) {
   );
 }
 
-export function Page({ children, back, gap = 16 }: { children: ReactNode; back?: string; gap?: 14 | 16 }) {
+export function Page({
+  children,
+  back,
+  tag,
+  gap = 16,
+}: {
+  children: ReactNode;
+  back?: string;
+  tag?: string;
+  gap?: 14 | 16;
+}) {
   return (
     <div
       className="mx-auto flex min-h-dvh max-w-[430px] flex-col px-5 pt-6 pb-7"
@@ -39,6 +50,8 @@ export function Page({ children, back, gap = 16 }: { children: ReactNode; back?:
             <Link to={back} className="t-strong text-sub">
               뒤로
             </Link>
+          ) : tag ? (
+            <span className="t-caption rounded-full bg-tile px-2.5 py-1 text-sub">{tag}</span>
           ) : undefined
         }
       />
@@ -192,16 +205,8 @@ export function Checkbox({
   sub?: ReactNode;
 }) {
   return (
-    <button type="button" onClick={() => onChange(!checked)} className="flex w-full items-start gap-3 text-left">
-      {checked ? (
-        <span className="mt-0.5 flex size-[22px] shrink-0 items-center justify-center rounded-md bg-brand text-white">
-          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-            <path d="M2.5 7.2 5.6 10.2 11.5 3.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
-      ) : (
-        <img src={checkboxOff} width={22} height={22} alt="" className="mt-0.5 shrink-0" />
-      )}
+    <button type="button" role="checkbox" aria-checked={checked} onClick={() => onChange(!checked)} className="flex w-full items-start gap-2.5 text-left">
+      <img src={checked ? checkboxOn : checkboxOff} width={22} height={22} alt="" className="mt-0.5 shrink-0" />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="t-strong">{title}</span>
         {sub && <span className="t-caption text-sub">{sub}</span>}
@@ -276,7 +281,7 @@ export function PlaceSearch({
 const statusText: Record<TripStatus, string> = {
   preparing: '출발 전',
   in_progress: '함께 가는 중',
-  settled: '정산 완료',
+  settled: '운행 끝',
   cancelled: '취소된 운행',
 };
 
@@ -288,6 +293,40 @@ export function StatusPill({ status }: { status: TripStatus }) {
     cancelled: 'bg-red-50 text-red-600',
   }[status];
   return <span className={`t-caption shrink-0 rounded-full px-2.5 py-1 ${look}`}>{statusText[status]}</span>;
+}
+
+// Settlement state of a folder batch or a 바로 정산 share (M5 요청 전, M6 정산 중, M6-1 정산 완료).
+export function BatchPill({ status }: { status: BatchStatus }) {
+  const [text, look] = {
+    open: ['요청 전', 'bg-[#e8ebf2] text-[#6b7380]'],
+    requested: ['정산 중', 'bg-[#fdefd9] text-[#d17300]'],
+    done: ['정산 완료', 'bg-[#e3f7eb] text-[#148f4d]'],
+  }[status];
+  return <span className={`t-caption shrink-0 rounded-full px-2 py-0.5 ${look}`}>{text}</span>;
+}
+
+// "10월 14일 (화) 출근" rows of the folder screens.
+export function AmountRow({ label, amount, strong }: { label: ReactNode; amount: number; strong?: boolean }) {
+  return (
+    <div className={`flex w-full items-center gap-2 ${strong ? 't-strong' : 't-body'}`}>
+      <span className={`min-w-0 flex-1 ${strong ? '' : 'text-sub'}`}>{label}</span>
+      <span className="shrink-0">{won(amount)}</span>
+    </div>
+  );
+}
+
+export const dayLabel = (iso: string) => {
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}월 ${d.getDate()}일 (${'일월화수목금토'[d.getDay()]})`;
+};
+
+export const isToday = (iso: string) => new Date(iso).toDateString() === new Date().toDateString();
+
+// Korean particle after a word: 은/는, 이/가, 을/를 depending on the last syllable's final consonant.
+export function josa(word: string, withFinal: string, withoutFinal: string) {
+  const c = word.charCodeAt(word.length - 1);
+  const hasFinal = c >= 0xac00 && c <= 0xd7a3 ? (c - 0xac00) % 28 > 0 : false;
+  return word + (hasFinal ? withFinal : withoutFinal);
 }
 
 export function QrImage({ text, size = 240 }: { text: string; size?: number }) {

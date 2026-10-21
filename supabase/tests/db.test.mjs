@@ -63,11 +63,15 @@ test('admin view needs the secret', async () => {
   await assert.rejects(rpc(db, 'get_trip', { p_code: 'ZZZZZZ' }), /trip_not_found/);
 });
 
-test('bank account is shown only to riders of a settled trip, and only with consent', async () => {
+test('bank account is shown only while a rider\'s settlement is in progress, and only with consent', async () => {
   const db = await freshDb();
   const { driver_secret } = await rpc(db, 'create_driver', { p_display_name: '지훈' });
   await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_name: '페어은행',
                                    p_bank_account: '000-0000-0000', p_account_holder: '지훈', p_bank_consent: true });
+  const stored = (await db.query('select bank_account from public.drivers')).rows[0].bank_account;
+  assert.ok(!Buffer.from(stored).toString('latin1').includes('000-0000-0000'), 'the account is stored encrypted');
+  assert.equal((await rpc(db, 'get_driver', { p_driver_secret: driver_secret })).bank.account, '000-0000-0000');
+
   const { code, admin_secret } = await rpc(db, 'create_trip', { p_title: 'MT', p_driver_secret: driver_secret });
   await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지' });
 
@@ -85,15 +89,128 @@ test('bank account is shown only to riders of a settled trip, and only with cons
   assert.equal(view.settlement.shares[0].is_me, true);
   assert.equal(view.settlement.shares[1].is_me, false);
   assert.ok(!JSON.stringify(view.settlement).includes(minji), 'passenger ids are not exposed');
-  assert.equal(view.bank.account, '000-0000-0000');
+  assert.equal(view.bank, null, 'not until the driver chooses how to settle');
+
+  await rpc(db, 'choose_settlement', { p_code: code, p_admin_secret: admin_secret, p_mode: 'direct' });
+  view = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) });
+  assert.equal(view.settle_mode, 'direct');
+  assert.equal(view.bank.account, '000-0000-0000', '바로 정산: shown while the passenger has not paid');
 
   const stranger = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(9) });
   assert.equal(stranger.bank, null, 'code holders who did not ride do not see the account');
 
+  const admin = await rpc(db, 'mark_paid', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji });
+  assert.ok(admin.passengers[0].paid_at);
+  view = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) });
+  assert.equal(view.paid, true);
+  assert.equal(view.bank, null, 'taken down once the driver marks it paid');
+
+  await rpc(db, 'mark_paid', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji, p_paid: false });
+  assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) })).bank.account, '000-0000-0000');
   await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_consent: false });
   view = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) });
   assert.equal(view.bank, null, 'withdrawing consent removes the account');
   await assert.rejects(rpc(db, 'join_trip', { p_code: code, p_device_key: device(3), p_name: '늦은 사람' }), /trip_closed/);
+});
+
+test('carpool folder stacks trips and settles them together', async () => {
+  const db = await freshDb();
+  const { driver_secret } = await rpc(db, 'create_driver', { p_display_name: '지훈' });
+  await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_name: '페어은행',
+                                   p_bank_account: '111-222', p_account_holder: '지훈', p_bank_consent: true });
+  const first = await rpc(db, 'create_trip', { p_title: '출근', p_driver_secret: driver_secret });
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진' });
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤' });
+  const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                          p_driver_secret: driver_secret });
+  const settle = async (trip, sujin, doyoon) => {
+    const ps = (await rpc(db, 'get_trip_admin', { p_code: trip.code, p_admin_secret: trip.admin_secret })).passengers;
+    const id = (n) => ps.find((p) => p.name === n).id;
+    await rpc(db, 'post_settlement', { p_code: trip.code, p_admin_secret: trip.admin_secret, p_payload: {
+      total: sujin + doyoon + 1000,
+      shares: [{ passenger_id: id('수진'), name: '수진', amount: sujin },
+               { passenger_id: id('도윤'), name: '도윤', amount: doyoon },
+               { passenger_id: null, name: '지훈', role: 'driver', amount: 1000 }] } });
+  };
+  const view = (trip, n) => rpc(db, 'get_trip', { p_code: trip.code, p_device_key: device(n) });
+
+  await settle(first, 2430, 2430);
+  await assert.rejects(rpc(db, 'choose_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                      p_mode: 'folder' }), /folder_required/);
+  let admin = await rpc(db, 'choose_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                   p_mode: 'folder', p_new_folder: '출근 카풀' });
+  assert.equal(admin.folder.name, '출근 카풀');
+  const folder = admin.folder.code;
+  assert.match(folder, /^[2-9A-HJ-NP-Z]{8}$/);
+  let v = await view(first, 1);
+  assert.equal(v.folder.status, 'open');
+  assert.equal(v.folder.rides.length, 1);
+  assert.equal(v.folder.totals, null, 'other riders\' sums stay hidden before the request');
+  assert.equal(v.bank, null, '요청 전: nothing to send yet');
+
+  // the next trip of the favourite suggests the same folder
+  const second = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
+  await settle(second, 2430, 2430);
+  admin = await rpc(db, 'get_trip_admin', { p_code: second.code, p_admin_secret: second.admin_secret });
+  assert.equal(admin.suggested_folder, folder);
+  await rpc(db, 'choose_settlement', { p_code: second.code, p_admin_secret: second.admin_secret,
+                                       p_mode: 'folder', p_folder_code: folder });
+  v = await view(second, 1);
+  assert.equal(v.folder.rides.length, 2);
+  assert.equal(Number(v.folder.my_total), 4860);
+
+  let list = await rpc(db, 'list_folders', { p_secret: driver_secret });
+  assert.deepEqual([list[0].name, list[0].status, list[0].trips, Number(list[0].amount)], ['출근 카풀', 'open', 2, 9720]);
+
+  // 합쳐서 정산하기
+  let f = await rpc(db, 'request_batch', { p_folder_code: folder, p_secret: driver_secret });
+  assert.equal(f.requested.payments.length, 2);
+  assert.equal(f.open.trips.length, 0);
+  v = await view(first, 1);
+  assert.equal(v.folder.status, 'requested');
+  assert.equal(Number(v.folder.payment.amount), 4860);
+  assert.equal(v.folder.totals.trips, 2);
+  assert.equal(v.bank.account, '111-222', '정산 중: the account is shown');
+
+  // a trip made meanwhile goes to a new batch; the requested one is locked
+  const third = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
+  await settle(third, 2500, 2500);
+  await rpc(db, 'choose_settlement', { p_code: third.code, p_admin_secret: third.admin_secret,
+                                       p_mode: 'folder', p_folder_code: folder });
+  v = await view(third, 1);
+  assert.equal(v.folder.status, 'requested', 'the newest trip link still shows what is owed');
+  assert.equal(Number(v.folder.payment.amount), 4860);
+  assert.equal(v.bank.account, '111-222');
+  await assert.rejects(rpc(db, 'choose_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                      p_mode: 'direct' }), /batch_locked/);
+  await assert.rejects(rpc(db, 'request_batch', { p_folder_code: folder, p_secret: driver_secret }), /batch_in_progress/);
+
+  // 정산 요청 취소 puts everything back into one open batch
+  f = await rpc(db, 'cancel_batch_request', { p_folder_code: folder, p_secret: driver_secret });
+  assert.equal(f.requested, null);
+  assert.equal(f.open.trips.length, 3);
+  assert.equal((await view(first, 1)).bank, null);
+
+  f = await rpc(db, 'request_batch', { p_folder_code: folder, p_secret: driver_secret });
+  const sujinPay = f.requested.payments.find((p) => p.name === '수진');
+  assert.equal(Number(sujinPay.amount), 7360);
+  assert.equal(sujinPay.trips, 3);
+  f = await rpc(db, 'mark_batch_paid', { p_folder_code: folder, p_secret: driver_secret, p_payment_id: sujinPay.id });
+  assert.ok(f.requested, 'still in progress while someone has not paid');
+  assert.equal((await view(first, 1)).bank, null, 'taken down for the one who paid');
+  assert.equal((await view(first, 2)).bank.account, '111-222', 'still shown to the one who has not');
+
+  const doyoonPay = f.requested.payments.find((p) => p.name === '도윤');
+  f = await rpc(db, 'mark_batch_paid', { p_folder_code: folder, p_secret: driver_secret, p_payment_id: doyoonPay.id });
+  assert.equal(f.requested, null);
+  assert.ok(f.last_done);
+  v = await view(third, 2);
+  assert.equal(v.folder.status, 'done');
+  assert.equal(v.bank, null, '정산 완료: the account is taken down');
+
+  list = await rpc(db, 'list_folders', { p_secret: driver_secret });
+  assert.deepEqual([list[0].status, list[0].trips], ['open', 0], 'the folder keeps going from zero');
+  await assert.rejects(rpc(db, 'get_folder_admin', { p_folder_code: folder, p_secret: 'someone-else' }), /not_allowed/);
 });
 
 test('saved carpool recreates the trip with the same members and adds up the month', async () => {

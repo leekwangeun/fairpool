@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { rpc, type Driver } from '../api';
+import { rpc, type Driver, type FolderItem } from '../api';
 import { store } from '../store';
-import { Button, Card, ErrorText, Field, Page, StatusPill, TextInput } from '../ui';
+import { BatchPill, Button, Card, ErrorText, Field, Page, StatusPill, TextInput, won } from '../ui';
 
-// Driver home: start a new trip, re-create a saved carpool, open recent trips.
+// Driver home: start a new trip, re-create a saved carpool, carpool folders, recent trips.
 export default function Home() {
   const navigate = useNavigate();
   const [driver, setDriver] = useState<Driver | null>(null);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  const [folders, setFolders] = useState<FolderItem[]>([]);
 
   useEffect(() => {
     const secret = store.driverSecret();
@@ -22,7 +24,16 @@ export default function Home() {
       .then(setDriver)
       .catch(() => store.setDriverSecret(null))
       .finally(() => setLoading(false));
+    rpc<FolderItem[]>('list_folders', { p_secret: secret })
+      .then(setFolders)
+      .catch(() => setFolders([]));
   }, []);
+
+  async function rename() {
+    const next = window.prompt('동승자에게 보일 이름', driver?.display_name ?? '');
+    if (!next?.trim()) return;
+    setDriver(await rpc<Driver>('update_driver', { p_driver_secret: store.driverSecret(), p_display_name: next }));
+  }
 
   async function start() {
     setError(null);
@@ -80,10 +91,15 @@ export default function Home() {
 
   return (
     <Page>
-      <div className="flex items-end justify-between pt-2">
-        <h1 className="text-2xl font-bold">{driver.display_name}님, 어디로 갈까요?</h1>
-        <Link to="/settings" className="text-sm text-sub underline-offset-2 hover:underline">
-          설정
+      <div className="flex items-end justify-between gap-3 pt-2">
+        <h1 className="text-2xl font-bold">
+          <button type="button" onClick={rename} className="text-left">
+            {driver.display_name}님
+          </button>
+          , 어디로 갈까요?
+        </h1>
+        <Link to="/settings" className="shrink-0 text-sm text-sub underline-offset-2 hover:underline">
+          받을 계좌
         </Link>
       </div>
 
@@ -100,6 +116,21 @@ export default function Home() {
                 지난 운행 다시 만들기
               </button>
             </div>
+          ))}
+        </Card>
+      )}
+
+      {folders.length > 0 && (
+        <Card className="gap-1">
+          <h2 className="t-strong mb-1">카풀 폴더</h2>
+          {folders.map((f) => (
+            <Link key={f.code} to={`/f/${f.code}`} className="flex items-center gap-2 py-2">
+              <span className="truncate">{f.name}</span>
+              <BatchPill status={f.status} />
+              <span className="t-caption ml-auto shrink-0 text-sub">
+                {f.trips}회 {won(f.amount)}
+              </span>
+            </Link>
           ))}
         </Card>
       )}
