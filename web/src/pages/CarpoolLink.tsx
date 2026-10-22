@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { rpc } from '../api';
 import { store } from '../store';
 import { Card, Page, won } from '../ui';
+import { useHomeScreenStart } from '../pwa';
 
 type Carpool = { code: string; title: string; latest_trip: string | null; month: { trips: number; my_amount: number } };
 
@@ -17,6 +18,7 @@ export default function CarpoolLink() {
       .then(setCarpool)
       .catch((e) => setError((e as Error).message));
   }, [code]);
+  useHomeScreenStart(`/c/${code.toUpperCase()}`, carpool?.title);
 
   if (error) {
     return (
@@ -48,6 +50,9 @@ export default function CarpoolLink() {
           <p className="text-sub">아직 새 운행이 없어요. 운전자가 만들면 여기서 열려요.</p>
         </Card>
       )}
+      <p className="t-caption text-center text-sub">
+        브라우저 메뉴의 "홈 화면에 추가"로 이 페이지를 두면 다음 운행도 여기서 바로 열려요
+      </p>
     </Page>
   );
 }

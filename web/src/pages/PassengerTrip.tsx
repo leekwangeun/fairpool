@@ -25,6 +25,7 @@ import {
   won,
 } from '../ui';
 import { CourseMap, hasPoint } from '../map';
+import { useHomeScreenStart } from '../pwa';
 import iconInfo from '../assets/figma/icon-info.svg';
 import iconLock from '../assets/figma/icon-lock.svg';
 import iconLocationOff from '../assets/figma/icon-location-off.svg';
@@ -53,6 +54,8 @@ export default function PassengerTrip() {
     }
   }
   usePolling(load);
+  // 홈 화면에 추가: a favourite's member keeps its stable link, anyone else this trip's page
+  useHomeScreenStart(trip ? (trip.carpool_code ? `/c/${trip.carpool_code}` : `/t/${trip.code}`) : null, trip?.title);
 
   if (notFound) {
     return (
