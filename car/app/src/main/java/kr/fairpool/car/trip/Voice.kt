@@ -39,7 +39,7 @@ object Voice {
     }
 
     private fun setUp(context: Context) {
-        tts = runCatching { TextToSpeech(context.applicationContext, TtsMode.HYBRID) }
+        tts = runCatching { TextToSpeech(context.applicationContext, TtsMode.ON_DEVICE) }
             .onFailure { TripEngine.log("음성 안내 SDK 없음: ${it.message}") }.getOrNull()
         tts?.let { t ->
             // the SDK only accepts listeners once initialize() has set it up
@@ -64,7 +64,7 @@ object Voice {
             }.onFailure { TripEngine.log("음성 안내 초기화 실패: ${it.message}") }
         }
 
-        stt = runCatching { SpeechToText(context.applicationContext, SttMode.HYBRID) }
+        stt = runCatching { SpeechToText(context.applicationContext, SttMode.ON_DEVICE) }
             .onFailure { TripEngine.log("음성 인식 SDK 없음: ${it.message}") }.getOrNull()
         stt?.let { s ->
             val results = object : ResultListener {

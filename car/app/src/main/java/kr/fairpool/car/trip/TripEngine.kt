@@ -88,6 +88,9 @@ data class TripState(
     val allocation: Allocation? = null,
     val settlementMethod: String = "",
     val settlementKm: Double = 0.0,
+    /** Road km of every group the settlement used (names, km after the passing rule), and where they came from. */
+    val coalitions: List<Pair<List<String>, Double>> = emptyList(),
+    val distanceSource: String = "",
     val settlementPosted: Boolean = false,
     val log: List<String> = emptyList(),
     val error: String? = null
@@ -114,6 +117,11 @@ object TripEngine {
     var fuelPrice: Int = 1700
     var defaultEfficiency: Double = 11.0
     var driverName: String = "운전자"
+    /** 시연 대비: settle with the table fetched at departure instead of asking the router again. */
+    var preferSavedTable: Boolean = false
+
+    /** Group road km fetched when the trip left, keyed by the members' ids ("driver" for the driver). */
+    private var savedTable: Map<Set<String>, Double> = emptyMap()
 
     private val time = SimpleDateFormat("HH:mm:ss", Locale.KOREA)
 
@@ -291,6 +299,38 @@ object TripEngine {
         }
         sendRoute()
         log("출발: 동승 ${starters.size}명, 주행거리 기준 ${"%.1f".format(km)}km")
+        prefetchTable()
+    }
+
+    /**
+     * At departure the planned course is known (start, every pickup and drop-off, end), so the road km of every
+     * group is fetched once. If the network drops later, or the demo switch is on, the settlement uses this table.
+     */
+    private fun prefetchTable() {
+        val s = _state.value
+        val origin = s.origin ?: return
+        val dest = s.destination ?: origin
+        if (s.rule == "equal") return
+        val owners = mutableListOf("driver" to origin)
+        s.passengers.filter { p -> p.boarded }.forEach { owners += it.id to origin }
+        for (st in s.plan) if (st.kind != "end" && st.passengerId != null) owners += st.passengerId to st.place
+        owners += "driver" to dest
+        val ids = owners.map { it.first }.distinct()
+        if (ids.size > 5) return
+        savedTable = emptyMap()
+        scope.launch(Dispatchers.Default) {
+            try {
+                val table = mutableMapOf<Set<String>, Double>()
+                for (mask in 1 until (1 shl ids.size)) {
+                    val members = ids.filterIndexed { i, _ -> mask and (1 shl i) != 0 }.toSet()
+                    table[members] = round1(routeKm(owners.filter { it.first in members }.map { it.second }))
+                }
+                savedTable = table
+                log("조합 거리표 미리 받음: ${table.size}개")
+            } catch (e: Exception) {
+                log("조합 거리표를 미리 받지 못함: ${e.message}")
+            }
+        }
     }
 
     /** Sliding window: next two stops as waypoints, the third (or the end) as the destination. */
@@ -537,15 +577,33 @@ object TripEngine {
         var method = "shapley"
         val full = (1 shl n) - 1
         val raw = DoubleArray(1 shl n)
-        try {
-            // N분의 1 needs only the whole course; the shares come from the group distances otherwise
-            for (mask in if (s.rule == "equal") listOf(full) else (1..full).toList()) {
-                val pts = seq.filter { mask and (1 shl it.owner) != 0 }.map { it.place }
-                raw[mask] = routeKm(pts)
+        val keyOf = { mask: Int -> riders.indices.filter { mask and (1 shl it) != 0 }.map { riders[it].id ?: "driver" }.toSet() }
+        val masks = if (s.rule == "equal") listOf(full) else (1..full).toList()
+        val saved = savedTable
+        val savedCovers = masks.all { saved.containsKey(keyOf(it)) }
+        var source = "osrm"
+        if (preferSavedTable && savedCovers) {
+            masks.forEach { raw[it] = saved.getValue(keyOf(it)) }
+            source = "saved"
+            log("시연 대비: 출발 때 받은 거리표로 계산")
+        } else {
+            try {
+                // N분의 1 needs only the whole course; the shares come from the group distances otherwise
+                for (mask in masks) {
+                    val pts = seq.filter { mask and (1 shl it.owner) != 0 }.map { it.place }
+                    raw[mask] = round1(routeKm(pts))
+                }
+            } catch (e: Exception) {
+                if (savedCovers) {
+                    masks.forEach { raw[it] = saved.getValue(keyOf(it)) }
+                    source = "saved"
+                    log("길찾기 실패, 출발 때 받은 거리표로 계산: ${e.message}")
+                } else {
+                    method = "fixed_route"
+                    source = "segments"
+                    log("길찾기 실패, 구간별 N분의 1로 계산: ${e.message}")
+                }
             }
-        } catch (e: Exception) {
-            method = "fixed_route"
-            log("길찾기 실패, 구간별 N분의 1로 계산: ${e.message}")
         }
 
         val shareKm: DoubleArray
@@ -580,7 +638,13 @@ object TripEngine {
         } else {
             Settlement.allocate(riders, shareKm, aloneKm, actualKm, fuelPerKm, s.toll, tollPayers, s.includeDriver, method)
         }
-        _state.update { it.copy(allocation = allocation, settlementMethod = method, settlementKm = actualKm) }
+        val groups = if (method == "shapley" && s.rule != "equal") {
+            val cost = Shapley.applyPassingRule(n, raw)
+            (1..full).map { m -> riders.indices.filter { m and (1 shl it) != 0 }.map { riders[it].name } to round1(cost[m]) }
+        } else emptyList()
+        _state.update {
+            it.copy(allocation = allocation, settlementMethod = method, settlementKm = actualKm, coalitions = groups, distanceSource = source)
+        }
         allocation
     }
 
@@ -604,6 +668,10 @@ object TripEngine {
             .put("fuel", JSONObject().put("distance_km", round1(s.settlementKm)).put("efficiency_km_l", round1(s.efficiencyKmL ?: defaultEfficiency))
                 .put("amount", a.fuelAmount))
             .put("shares", shares)
+            .put("distance_source", s.distanceSource)
+            .put("coalitions", JSONArray().apply {
+                for ((names, km) in s.coalitions) put(JSONObject().put("members", JSONArray(names)).put("km", km))
+            })
     }
 
     suspend fun postSettlement(): Boolean {

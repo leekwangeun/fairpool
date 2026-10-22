@@ -104,6 +104,7 @@ class MainActivity : ComponentActivity() {
         TripEngine.rpc = rpc
         TripEngine.fuelPrice = config.fuelPrice
         TripEngine.defaultEfficiency = config.efficiency.toDouble()
+        TripEngine.preferSavedTable = config.useSavedTable
         TripService.start(this)
         // speech answers on the L5 card and Pleos fused location (both dangerous permissions)
         val wanted = arrayOf(android.Manifest.permission.RECORD_AUDIO, "pleos.car.permission.FUSED_LOCATION")
@@ -339,6 +340,7 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
     var site by remember { mutableStateOf(config.siteUrl) }
     var key by remember { mutableStateOf(config.anonKey) }
     var demo by remember { mutableStateOf(config.demo) }
+    var savedTable by remember { mutableStateOf(config.useSavedTable) }
     var price by remember { mutableStateOf(config.fuelPrice.toString()) }
     var efficiency by remember { mutableStateOf(config.efficiency.toString()) }
     var secret by remember { mutableStateOf(config.vehicleSecret ?: "") }
@@ -362,6 +364,12 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
                 Spacer(Modifier.width(12.dp))
                 Body("데모 모드 (서버 없이 앱 안에서 응답)", Ink)
             }
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(savedTable, { savedTable = it })
+                Spacer(Modifier.width(12.dp))
+                Body("시연 대비: 출발 때 받아 둔 조합 거리표로 정산 (길찾기를 다시 하지 않음)", Ink)
+            }
         }
         Spacer(Modifier.height(16.dp))
         Btn("저장", Modifier.fillMaxWidth()) {
@@ -369,6 +377,8 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
             config.siteUrl = site
             config.anonKey = key
             config.demo = demo
+            config.useSavedTable = savedTable
+            TripEngine.preferSavedTable = savedTable
             config.fuelPrice = price.toIntOrNull() ?: 1700
             config.vehicleSecret = secret.ifEmpty { null }
             TripEngine.fuelPrice = config.fuelPrice
@@ -936,6 +946,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
     var chosen by remember { mutableStateOf<String?>(null) }
     var newFolder by remember { mutableStateOf("") }
     var tollEdit by remember { mutableStateOf<String?>(null) }
+    var showGroups by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         val a = TripEngine.computeSettlement()
         if (a != null) {
@@ -947,6 +958,31 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
         runCatching { folders = rpc.call("get_trip_admin", args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret)).optJSONArray("folders") ?: JSONArray() }
     }
     val a = trip.allocation
+    if (showGroups) {
+        Dialog(onDismissRequest = { showGroups = false }) {
+            Card(Modifier.width(640.dp)) {
+                Title("조합별 거리", 26)
+                val from = when (trip.distanceSource) {
+                    "saved" -> "출발 때 받아 둔 거리표"
+                    "segments" -> "길찾기 없이 구간별로 나눔"
+                    else -> "도착 후 길찾기로 받은 도로 거리"
+                }
+                Body("$from · 돌아가는 조합은 지나가는 경로로 맞춤", size = 15)
+                Spacer(Modifier.height(12.dp))
+                Column(Modifier.height(520.dp).verticalScroll(rememberScrollState())) {
+                    for ((names, km) in trip.coalitions.sortedBy { it.first.size }) {
+                        Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                            Text(names.joinToString(" + "), fontSize = 18.sp, color = Ink, modifier = Modifier.weight(1f))
+                            Text("%.1fkm".format(km), fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        }
+                    }
+                    if (trip.coalitions.isEmpty()) Body("이번 정산은 조합 거리를 쓰지 않았어요", size = 16)
+                }
+                Spacer(Modifier.height(12.dp))
+                Btn("닫기", Modifier.fillMaxWidth(), primary = false) { showGroups = false }
+            }
+        }
+    }
     tollEdit?.let { value ->
         Dialog(onDismissRequest = { tollEdit = null }) {
             Card(Modifier.width(560.dp)) {
@@ -996,7 +1032,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Stat("총 거리", "%.1fkm".format(trip.settlementKm), Modifier.weight(1f))
+                    Stat("총 거리 (눌러서 조합별 거리)", "%.1fkm".format(trip.settlementKm), Modifier.weight(1f).clickable { showGroups = true })
                     Stat("연비", "%.1fkm/L".format(trip.efficiencyKmL ?: TripEngine.defaultEfficiency), Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))

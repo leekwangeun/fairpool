@@ -56,6 +56,10 @@ class Config(context: Context) {
     var fuelPrice: Int
         get() = prefs.getInt("fuel_price", 1700)
         set(v) = prefs.edit().putInt("fuel_price", v).apply()
+    /** 시연 대비: settle with the group distances fetched at departure. */
+    var useSavedTable: Boolean
+        get() = prefs.getBoolean("use_saved_table", false)
+        set(v) = prefs.edit().putBoolean("use_saved_table", v).apply()
     /** Used when the car does not report fuel economy (the emulator is an EV). */
     var efficiency: Float
         get() = prefs.getFloat("efficiency", 11f)
