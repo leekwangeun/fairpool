@@ -193,7 +193,13 @@ test('carpool folder stacks trips and settles them together', async () => {
   assert.equal(Number(p.me.amount), 4860);
   assert.equal(p.me.rides.length, 2);
   assert.equal(p.bank.account, '111-222', '정산 중: the account is shown');
-  assert.ok(!JSON.stringify(p).includes('도윤'), 'each rider sees only their own part');
+  // M6: who rode along and their share, and the batch as a whole; the account and paid state are only mine
+  assert.ok(p.me.rides.every((r) => r.people.some((x) => x.name === '도윤' && !x.is_me)));
+  assert.ok(p.me.rides.every((r) => r.people.find((x) => x.is_me).name === '수진'));
+  assert.deepEqual(p.batch.others, ['도윤']);
+  assert.equal(p.batch.trips, 2);
+  assert.equal(Number(p.batch.others_amount), 9720 - 4860);
+  assert.equal(p.payments, undefined, 'no one else\'s paid state');
   const stranger = await page(code, 9);
   assert.equal(stranger.me, null);
   assert.equal(stranger.bank, null);

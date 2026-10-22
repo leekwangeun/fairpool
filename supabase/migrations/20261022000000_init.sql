@@ -122,7 +122,7 @@ create table public.carpools (
   origin         jsonb,
   destination    jsonb,                  -- places are {label, area, lat, lng}
   include_driver boolean not null default true,
-  seats          int not null default 4,
+  seats          int not null default 4 check (seats between 1 and 4),
   rule           text not null default 'shapley',
   folder_id      uuid references public.folders(id) on delete set null,  -- folder its trips go to
   created_at     timestamptz not null default now(),
@@ -154,13 +154,16 @@ create table public.trips (
   origin         jsonb,                  -- where the car starts; shown to passengers
   destination    jsonb,                  -- driver's own destination; never shown to passengers
   include_driver boolean not null default true,
-  seats          int not null default 4 check (seats between 1 and 8),
+  seats          int not null default 4 check (seats between 1 and 4),  -- passengers; 5 with the driver
   rule           text not null default 'shapley' check (rule in ('shapley', 'distance', 'equal')),
   status         text not null default 'preparing'
                  check (status in ('preparing', 'in_progress', 'settled', 'cancelled')),
   -- live course posted by the car: {stops:[{kind, passenger_id, label, area, time, eta_min,
   -- distance_km, state}], car:{lat,lng}}; filtered per passenger in get_trip
   progress       jsonb,
+  -- places the driver stops at on the way, in order (set_driver_stops): [{id, label, area, address, lat, lng}].
+  -- Passengers see them only as "들를 곳 1곳"; cleared with the stops a day after the trip ends
+  driver_stops   jsonb,
   -- once the trip has started, new passengers may join only while the car shows the invite QR again
   -- while parked (set_join_open); the window closes by itself after 10 minutes
   join_open_until timestamptz,
@@ -407,12 +410,14 @@ language sql stable set search_path = public, extensions as $$
                                                      else s -> 'label' end,
                                        'time', s -> 'time', 'eta_min', s -> 'eta_min',
                                        'distance_km', s -> 'distance_km', 'state', s -> 'state')
+                  when s ->> 'kind' = 'driver_stop' then
+                    jsonb_build_object('kind', 'other_stop', 'eta_min', s -> 'eta_min', 'state', s -> 'state')
                   else
                     jsonb_build_object('kind', 'other_' || (s ->> 'kind'),
                                        'time', s -> 'time', 'eta_min', s -> 'eta_min', 'state', s -> 'state')
                 end order by ord), '[]'::jsonb)
               from jsonb_array_elements(p -> 'stops') with ordinality as x(s, ord)
-              where s ->> 'kind' in ('start', 'pickup', 'dropoff')))
+              where s ->> 'kind' in ('start', 'pickup', 'dropoff', 'driver_stop')))
   end
 $$;
 
@@ -592,6 +597,8 @@ declare
 begin
   if p_driver_secret is not null and d.id is null then raise exception 'not_allowed'; end if;
   if p_vehicle_secret is not null and v.id is null then raise exception 'not_allowed'; end if;
+  -- the fair split is computed for every group of riders in the car: up to 4 passengers and the driver
+  if coalesce(p_seats, 4) not between 1 and 4 then raise exception 'bad_seats'; end if;
   insert into public.trips (code, admin_hash, driver_id, vehicle_id, title, origin, destination,
                             include_driver, seats, rule)
   values (public._new_trip_code(), public._hash(s), coalesce(d.id, public._car_driver(v.id)), v.id,
@@ -781,6 +788,19 @@ begin
     'carpool_code', (select code from public.carpools where id = t.carpool_id),
     'passengers', public._passengers_admin(t.id),
     'progress', t.progress,
+    'driver_stops', coalesce(t.driver_stops, '[]'::jsonb),
+    -- every place the car has to pass, for NaviHelper waypoints; the car decides the order (L3)
+    'waypoints', (select coalesce(jsonb_agg(w), '[]'::jsonb) from (
+                    select jsonb_build_object('kind', 'pickup', 'passenger_id', p.id, 'name', p.name) || p.pickup as w
+                    from public.trip_passengers p
+                    where p.trip_id = t.id and p.pickup is not null and p.record_deleted_at is null
+                    union all
+                    select jsonb_build_object('kind', 'dropoff', 'passenger_id', p.id, 'name', p.name) || p.dropoff
+                    from public.trip_passengers p
+                    where p.trip_id = t.id and p.dropoff is not null and p.record_deleted_at is null
+                    union all
+                    select jsonb_build_object('kind', 'driver_stop', 'stop_id', x ->> 'id') || (x - 'id')
+                    from jsonb_array_elements(coalesce(t.driver_stops, '[]'::jsonb)) x) z),
     'settlement', (select payload from public.settlements where trip_id = t.id),
     'settle_mode', t.settle_mode,
     'folder', (select jsonb_build_object('code', f.code, 'name', f.name, 'status', b.status)
@@ -1042,6 +1062,33 @@ begin
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
+-- 운전자가 들를 곳 (L3, picked on the car from the navi favourites or recent destinations): the driver's
+-- own stops on the way, in order. The whole list is sent each time, so adding, removing and reordering
+-- are the same call. They join the passengers' places in `waypoints`; passengers see them only as
+-- "들를 곳 1곳", and the car counts the detour as the driver's own part of the settlement.
+create or replace function public.set_driver_stops(p_code text, p_admin_secret text, p_stops jsonb) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  t public.trips := public._trip_admin(p_code, p_admin_secret);
+  list jsonb := coalesce(p_stops, '[]'::jsonb);
+begin
+  if t.status not in ('preparing', 'in_progress') then raise exception 'trip_closed'; end if;
+  if jsonb_typeof(list) <> 'array' then raise exception 'bad_stops'; end if;
+  if jsonb_array_length(list) > 5 then raise exception 'too_many_stops'; end if;
+  if exists (select 1 from jsonb_array_elements(list) x
+             where nullif(trim(x ->> 'label'), '') is null or not (x ? 'lat' and x ? 'lng')) then
+    raise exception 'place_needs_location';
+  end if;
+  update public.trips set driver_stops = (
+    select nullif(coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+             'id', coalesce(x ->> 'id', gen_random_uuid()::text), 'label', trim(x ->> 'label'),
+             'area', x -> 'area', 'address', x -> 'address', 'lat', x -> 'lat', 'lng', x -> 'lng'))
+             order by ord), '[]'::jsonb), '[]'::jsonb)
+    from jsonb_array_elements(list) with ordinality as y(x, ord))
+  where id = t.id;
+  return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
 -- ---------------------------------------------------------------- 바로 정산 / 카풀 폴더
 
 -- The folder's owner: its driver (driver secret or a car linked to that driver) or the car that made it.
@@ -1156,8 +1203,9 @@ language sql stable set search_path = public, extensions as $$
 $$;
 
 -- The one settlement page of a batch (M6 정산 중, M6-1 정산 완료). Everyone in the folder gets the same
--- link or QR, and each phone sees only its own rides and sum. The account is shown while that
--- person's part is unpaid.
+-- link or QR. A rider sees their own rides with who rode along and each one's share, and the batch as a
+-- whole (trips, total, the others' sum, the driver's part); the account, the paid state and the
+-- confirmation are their own only. The account is shown while that person's part is unpaid.
 create or replace function public.get_settle_page(p_code text, p_device_key text default null) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
@@ -1178,7 +1226,12 @@ begin
              'amount', (x ->> 'amount')::numeric, 'from', x ->> 'from', 'to', x ->> 'to', 'km', x -> 'km',
              'total', (st.payload ->> 'total')::numeric,
              'driver', (select coalesce(sum((y ->> 'amount')::numeric), 0)
-                        from jsonb_array_elements(st.payload -> 'shares') y where y ->> 'role' = 'driver'))
+                        from jsonb_array_elements(st.payload -> 'shares') y where y ->> 'role' = 'driver'),
+             'people', (select coalesce(jsonb_agg(jsonb_build_object(
+                          'name', y ->> 'name', 'amount', (y ->> 'amount')::numeric,
+                          'is_me', y ->> 'passenger_id' = p.id::text) order by yo), '[]'::jsonb)
+                        from jsonb_array_elements(st.payload -> 'shares') with ordinality as z(y, yo)
+                        where y ->> 'role' is distinct from 'driver'))
              order by coalesce(t.ended_at, t.created_at) desc), '[]'::jsonb)
       into rides
     from public.trips t
@@ -1194,6 +1247,16 @@ begin
     'me', case when pay.id is null then null else jsonb_build_object(
       'name', pay.name, 'amount', pay.amount, 'trips', pay.trips, 'paid', pay.paid_at is not null,
       'rides', rides) end,
+    -- "16회 중 14회", "16회 총비용", "민호, 지은 23,610원", "운전자 몫": only for someone who rode
+    'batch', case when pay.id is null then null else (
+      select jsonb_build_object('trips', sm -> 'trips', 'total', sm -> 'total', 'driver_amount', sm -> 'driver_amount',
+               'others', (select coalesce(jsonb_agg(o.name order by o.name), '[]'::jsonb)
+                          from public.batch_payments o where o.batch_id = b.id and o.id <> pay.id),
+               'others_amount', (select coalesce(sum(o.amount), 0)
+                                 from public.batch_payments o where o.batch_id = b.id and o.id <> pay.id))
+      from (select jsonb_build_object('trips', jsonb_array_length(x -> 'trips'), 'total', x -> 'total',
+                                      'driver_amount', x -> 'driver_amount') as sm
+            from public._batch_summary(b.id) x) q) end,
     'bank', case when pay.id is not null and pay.paid_at is null and b.status = 'requested'
                       and d.bank_consent_at is not null
               then jsonb_build_object('bank_name', d.bank_name, 'account', public._dec(d.bank_account),
@@ -2056,8 +2119,8 @@ begin
   where p.trip_id = t.id and t.ended_at < now() - interval '24 hours'
     and (p.pickup is not null or p.dropoff is not null or p.exact_stops is not null);
   get diagnostics n_loc = row_count;
-  update public.trips set progress = null
-  where ended_at < now() - interval '24 hours' and progress is not null;
+  update public.trips set progress = null, driver_stops = null
+  where ended_at < now() - interval '24 hours' and (progress is not null or driver_stops is not null);
   update public.trips set status = 'cancelled', ended_at = now()
   where (status = 'preparing' and created_at < now() - interval '7 days')
      or (status = 'in_progress' and coalesce(started_at, created_at) < now() - interval '7 days');
@@ -2083,7 +2146,7 @@ declare
     'get_bank_account', 'set_bank_account', 'get_driver_info', 'set_driver_info',
     'queue_trip_share', 'queue_batch_share',
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
-    'get_trip_admin', 'set_trip_status', 'set_join_open', 'update_progress', 'mark_passenger', 'post_settlement',
+    'get_trip_admin', 'set_trip_status', 'set_join_open', 'set_driver_stops', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
     'cancel_batch_request', 'mark_batch_paid', 'create_folder',
     'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool', 'archive_folder',

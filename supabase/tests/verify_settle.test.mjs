@@ -125,7 +125,7 @@ test('invite window after departure closes by itself after 10 minutes', async ()
 
 // ---------------------------------------------------------------- 2. folder batches
 
-test('folder: no page per trip, one page per batch, each phone sees only its own part', async () => {
+test('folder: no page per trip, one page per batch, who rode along is shown but the account is each one\'s own', async () => {
   const db = await freshDb();
   const { driver_secret, vehicle_secret } = await driverWithCar(db);
   // different riders each day (계산 예시 3)
@@ -169,9 +169,20 @@ test('folder: no page per trip, one page per batch, each phone sees only its own
   assert.equal(Number(mine.me.amount), 3080);
   assert.equal(mine.me.rides.length, 2);
   assert.equal(mine.bank.account, '111-222-333');
-  assert.ok(!JSON.stringify(mine).includes('수진') && !JSON.stringify(mine).includes('지은'), 'no one else\'s name or sum');
+  // M6: in each of my rides, who rode along and each one's share, but not where others got on and off
+  const three = mine.me.rides.find((r) => r.people.length === 3);
+  assert.deepEqual(three.people.map((x) => [x.name, Number(x.amount), x.is_me]),
+                   [['수진', 1670, false], ['민호', 1300, true], ['지은', 1430, false]]);
+  assert.ok(three.people.every((x) => !('from' in x) && !('to' in x)));
+  // "3회 중 2회", "3회 총비용", "수진, 지은 7,430원", "운전자 몫"
+  assert.equal(mine.batch.trips, 3);
+  assert.equal(Number(mine.batch.total), 19510);
+  assert.equal(Number(mine.batch.driver_amount), 9000);
+  assert.deepEqual(mine.batch.others, ['수진', '지은']);
+  assert.equal(Number(mine.batch.others_amount), 6000 + 1430);
   const outsider = await rpc(db, 'get_settle_page', { p_code: req.code });
   assert.equal(outsider.me, null);
+  assert.equal(outsider.batch, null, 'a phone that did not ride sees no names');
   assert.equal(outsider.bank, null, 'the account is not shown to a phone that did not ride');
 
   // a trip after the request goes into a new batch; the requested sums do not move
