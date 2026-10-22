@@ -196,7 +196,7 @@ function Join({
         </Field>
         <p className="t-caption text-faint">
           {trip.carpool_code
-            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 운전자에게 삭제를 요청할 수 있어요'
+            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 지울 수 있어요'
             : '정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요'}
         </p>
       </Card>
@@ -415,20 +415,19 @@ function Riding({
           탈 곳, 내릴 곳 바꾸기
         </button>
       )}
-      {me.removal_requested ? (
-        <p className="t-caption text-center text-sub">내 장소 삭제를 요청했어요. {trip.driver_name}님이 차에서 승인하면 지워져요</p>
+      {me.place_removed ? (
+        <p className="t-caption text-center text-sub">내 장소를 지웠어요. {trip.driver_name}님 차에는 다음 시동 때 반영돼요</p>
       ) : (
-        (me.pickup || me.dropoff) &&
-        !me.place_removed && (
+        (me.pickup || me.dropoff) && (
           <button
             type="button"
             onClick={async () => {
-              if (!window.confirm(`${trip.driver_name}님에게 내 장소 삭제를 요청할까요? 승인되면 남은 경로에서도 빠져요.`)) return;
-              onChange(await rpc<PublicTrip>('request_place_removal', { p_code: trip.code, p_device_key: deviceKey }));
+              if (!window.confirm('내 장소를 지울까요? 남은 경로에서도 빠지고, 지난 운행 기록과 정산 금액은 남아요.')) return;
+              onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
             }}
             className="t-caption text-sub underline underline-offset-2"
           >
-            내 장소 삭제 요청
+            내 장소 지우기
           </button>
         )
       )}
@@ -529,7 +528,7 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
         )}
       </Card>
 
-      <PlaceRequest trip={trip} deviceKey={deviceKey} onChange={onChange} />
+      <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
 
       {(hasPoint(me.pickup) || hasPoint(me.dropoff)) && (
         <CourseMap height={170} pickup={hasPoint(me.pickup) ? me.pickup : null} dropoff={hasPoint(me.dropoff) ? me.dropoff : null} />
@@ -553,33 +552,28 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
   );
 }
 
-// "내 장소 삭제 요청": the passenger asks, the driver approves on the car screen. Trip records stay.
-function PlaceRequest({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+// "내 장소 지우기": removed right away, no driver approval; the car picks it up at the next ignition.
+// Past trip records and settled amounts stay.
+function SavedPlace({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
   const me = trip.me!;
   const places = [me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', ');
   if (me.place_removed) {
-    return <p className="t-caption text-center text-sub">{trip.driver_name}님이 내 장소 삭제 요청을 승인했어요</p>;
+    return <p className="t-caption text-center text-sub">내 장소를 지웠어요. {trip.driver_name}님 차에는 다음 시동 때 반영돼요</p>;
   }
   if (!trip.carpool_code || !me.save_place || !places) return null;
 
-  async function ask() {
-    if (!window.confirm(`${trip.driver_name}님에게 내 장소 삭제를 요청할까요? 운전자가 승인하면 지워져요.`)) return;
-    onChange(await rpc<PublicTrip>('request_place_removal', { p_code: trip.code, p_device_key: deviceKey }));
+  async function forget() {
+    if (!window.confirm('내 장소를 지울까요? 지난 운행 기록과 정산 금액은 남아요.')) return;
+    onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
   }
 
   return (
     <section className="flex w-full flex-col items-start gap-2 rounded-[20px] bg-brand-soft px-[18px] py-4">
       <p className="t-strong text-brand">{trip.driver_name}님 차에 내 장소가 저장됐어요</p>
-      <p className="t-caption text-sub">
-        {me.removal_requested
-          ? '삭제를 요청했어요. 운전자가 승인하면 지워지고, 이미 남은 운행 기록은 그대로예요'
-          : `다음에 이 카풀로 운행하면 ${josa(places, '이', '가')} 바로 채워져요`}
-      </p>
-      {!me.removal_requested && (
-        <button type="button" onClick={ask} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
-          내 장소 삭제 요청
-        </button>
-      )}
+      <p className="t-caption text-sub">다음에 이 카풀로 운행하면 {josa(places, '이', '가')} 바로 채워져요</p>
+      <button type="button" onClick={forget} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
+        내 장소 지우기
+      </button>
     </section>
   );
 }
@@ -623,7 +617,7 @@ function FolderView({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey
           <p className="t-caption text-sub">같은 길을 같은 사람과 다녀서 계산 결과가 같아요. 길이 달라지면 그날 금액도 달라져요</p>
         </Card>
       )}
-      <PlaceRequest trip={trip} deviceKey={deviceKey} onChange={onChange} />
+      <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
     </Page>
   );
 }

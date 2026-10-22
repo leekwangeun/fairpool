@@ -179,9 +179,7 @@ create table public.trip_passengers (
   boarded_at      timestamptz,
   alighted_at     timestamptz,
   paid_at         timestamptz,           -- 바로 정산: the driver confirmed this passenger paid
-  -- "내 장소 삭제 요청": the passenger asks, the driver (car screen) approves
-  removal_requested_at timestamptz,
-  place_removed_at     timestamptz,
+  place_removed_at timestamptz,          -- "내 장소 지우기"; the car picks it up at the next ignition
   unique (trip_id, device_key_hash)
 );
 
@@ -283,7 +281,7 @@ language sql stable set search_path = public, extensions as $$
   select coalesce(jsonb_agg(jsonb_build_object(
            'id', id, 'name', name, 'pickup', pickup, 'dropoff', dropoff, 'seat', seat,
            'save_place', save_place, 'estimate', estimate, 'paid_at', paid_at,
-           'removal_requested_at', removal_requested_at, 'place_removed_at', place_removed_at,
+           'place_removed_at', place_removed_at,
            'joined_at', joined_at, 'boarded_at', boarded_at, 'alighted_at', alighted_at)
          order by joined_at), '[]'::jsonb)
   from public.trip_passengers where trip_id = p_trip
@@ -466,7 +464,6 @@ begin
             'name', me.name, 'pickup', me.pickup, 'dropoff', me.dropoff, 'save_place', me.save_place,
             'estimate', me.estimate, 'boarded', me.boarded_at is not null,
             'alighted', me.alighted_at is not null,
-            'removal_requested', me.removal_requested_at is not null,
             'place_removed', me.place_removed_at is not null) end,
     'progress', public._progress_for(t.progress, me),
     -- folder trips have no settlement page of their own (each rider's part goes to the batch page)
@@ -559,20 +556,30 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
--- "내 장소 삭제 요청": a passenger never deletes their place directly; the driver approves on the car
--- screen (resolve_place_removal). Can be sent at any time, before, during or after the trip.
-create or replace function public.request_place_removal(p_code text, p_device_key text) returns jsonb
+-- "내 장소 지우기": the passenger removes their own place right away, no driver approval. The place kept
+-- for the favourite's next trip goes and saving stops; on a trip not finished yet the stops go too (the
+-- car then asks NaviHelper for the whole route again with requestRouteWithWaypoints). Past trip records
+-- and settled amounts stay.
+create or replace function public.forget_my_place(p_code text, p_device_key text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips;
   me public.trip_passengers;
+  live boolean;
 begin
   select * into t from public.trips where code = upper(p_code);
   if t.id is null then raise exception 'trip_not_found'; end if;
   select * into me from public.trip_passengers
    where trip_id = t.id and device_key_hash = public._hash(p_device_key);
   if me.id is null then raise exception 'not_allowed'; end if;
-  update public.trip_passengers set removal_requested_at = coalesce(removal_requested_at, now()) where id = me.id;
+  live := t.status in ('preparing', 'in_progress');
+  update public.trip_passengers set
+    save_place = false, place_removed_at = now(),
+    pickup = case when live then null else pickup end,
+    dropoff = case when live then null else dropoff end
+  where id = me.id;
+  update public.carpool_members set pickup = null, dropoff = null
+  where carpool_id = t.carpool_id and device_key_hash = me.device_key_hash;
   return public.get_trip(p_code, p_device_key);
 end $$;
 
@@ -628,34 +635,6 @@ begin
                  'name', (select name from public.trip_passengers p where p.id = i.passenger_id))
                  order by i.created_at), '[]'::jsonb)
                from public.trip_issues i where i.trip_id = t.id));
-end $$;
-
--- The driver approves or declines a 내 장소 삭제 요청. Approved: the kept place of the favourite goes and
--- saving stops; on a trip not finished yet the stops go too (the car then asks NaviHelper for the whole
--- route again with requestRouteWithWaypoints). A finished trip's record stays; the car re-settles if
--- needed and post_settlement keeps the previous result.
-create or replace function public.resolve_place_removal(p_code text, p_admin_secret text, p_passenger_id uuid,
-                                                        p_approve boolean default true) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare
-  t public.trips := public._trip_admin(p_code, p_admin_secret);
-  p public.trip_passengers;
-  live boolean := t.status in ('preparing', 'in_progress');
-begin
-  select * into p from public.trip_passengers where id = p_passenger_id and trip_id = t.id;
-  if p.id is null or p.removal_requested_at is null then raise exception 'no_removal_request'; end if;
-  if p_approve then
-    update public.trip_passengers set
-      save_place = false, removal_requested_at = null, place_removed_at = now(),
-      pickup = case when live then null else pickup end,
-      dropoff = case when live then null else dropoff end
-    where id = p.id;
-    update public.carpool_members set pickup = null, dropoff = null
-    where carpool_id = t.carpool_id and device_key_hash = p.device_key_hash;
-  else
-    update public.trip_passengers set removal_requested_at = null where id = p.id;
-  end if;
-  return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
 create or replace function public.set_trip_status(p_code text, p_admin_secret text, p_status text) returns jsonb
@@ -1322,8 +1301,8 @@ declare
   fn text;
   api text[] := array[
     'create_driver', 'update_driver', 'get_driver',
-    'create_trip', 'get_trip', 'join_trip', 'verify_device', 'leave_trip', 'request_place_removal', 'report_issue',
-    'resolve_place_removal', 'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
+    'create_trip', 'get_trip', 'join_trip', 'verify_device', 'leave_trip', 'forget_my_place', 'report_issue',
+    'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
     'get_trip_admin', 'set_trip_status', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
     'cancel_batch_request', 'mark_batch_paid',

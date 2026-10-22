@@ -27,7 +27,6 @@ const messages: Record<string, string> = {
   batch_in_progress: '정산 중인 묶음이 끝나면 다시 요청할 수 있어요.',
   nothing_to_settle: '아직 쌓인 운행이 없어요.',
   no_request: '정산 중인 묶음이 없어요.',
-  no_removal_request: '장소 삭제 요청이 없어요.',
   page_not_found: '정산 페이지를 찾을 수 없어요. 운전자가 정산 요청을 취소했을 수 있어요.',
 };
 
@@ -155,7 +154,6 @@ export type PublicTrip = {
     estimate: number | null;
     boarded: boolean;
     alighted: boolean;
-    removal_requested: boolean;
     place_removed: boolean;
   } | null;
   progress: { car: { lat: number; lng: number } | null; stops: Stop[] } | null;
@@ -235,7 +233,6 @@ export type AdminPassenger = {
   boarded_at: string | null;
   alighted_at: string | null;
   paid_at: string | null;
-  removal_requested_at: string | null;
   place_removed_at: string | null;
 };
 

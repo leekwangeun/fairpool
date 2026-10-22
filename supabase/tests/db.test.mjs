@@ -265,16 +265,13 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   await rpc(db, 'post_settlement', { p_code: next.code, p_admin_secret: next.admin_secret,
                                      p_payload: await shareFor(next.code, next.admin_secret) });
 
-  // 내 장소 삭제 요청: the passenger asks, the driver approves; the finished trip's record stays
-  const asked = await rpc(db, 'request_place_removal', { p_code: next.code, p_device_key: device(1) });
-  assert.equal(asked.me.removal_requested, true);
-  assert.equal(asked.me.save_place, true, 'nothing changes until the driver approves');
-  const sujinId = (await rpc(db, 'get_trip_admin', { p_code: next.code, p_admin_secret: next.admin_secret }))
-    .passengers.find((p) => p.name === '수진').id;
-  const approved = await rpc(db, 'resolve_place_removal', { p_code: next.code, p_admin_secret: next.admin_secret,
-                                                           p_passenger_id: sujinId });
-  const sujinRow = approved.passengers.find((p) => p.name === '수진');
-  assert.ok(sujinRow.place_removed_at);
+  // 내 장소 지우기: the passenger removes it right away, no driver approval; the finished trip's record stays
+  const forgot = await rpc(db, 'forget_my_place', { p_code: next.code, p_device_key: device(1) });
+  assert.equal(forgot.me.place_removed, true);
+  assert.equal(forgot.me.save_place, false);
+  const sujinRow = (await rpc(db, 'get_trip_admin', { p_code: next.code, p_admin_secret: next.admin_secret }))
+    .passengers.find((p) => p.name === '수진');
+  assert.ok(sujinRow.place_removed_at, 'the car sees it at the next ignition');
   assert.equal(sujinRow.pickup.label, '버스정류장', 'the record of a finished trip is not deleted');
   const third = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
   const cleared = await rpc(db, 'get_trip', { p_code: third.code, p_device_key: device(1) });
@@ -416,24 +413,22 @@ test('a full car refuses new passengers but lets members edit', async () => {
   assert.equal(v.seats_left, 0);
 });
 
-test('records are corrected, never deleted: a place removal during a trip and a re-settlement', async () => {
+test('records are corrected, never deleted: removing my place during a trip and a re-settlement', async () => {
   const db = await freshDb();
   const { code, admin_secret } = await rpc(db, 'create_trip', { p_title: '출근' });
   await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지', p_phone4: '1234',
                                p_pickup: place('정류장'), p_dropoff: place('집') });
   await rpc(db, 'set_trip_status', { p_code: code, p_admin_secret: admin_secret, p_status: 'in_progress' });
 
-  // approved while driving: the stops leave the route, so the car asks NaviHelper for the whole route again
-  await rpc(db, 'request_place_removal', { p_code: code, p_device_key: device(1) });
+  // removed while driving: the stops leave the route, so the car asks NaviHelper for the whole route again
+  await rpc(db, 'forget_my_place', { p_code: code, p_device_key: device(1) });
   let admin = await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret });
   const minji = admin.passengers[0];
-  assert.ok(minji.removal_requested_at);
-  admin = await rpc(db, 'resolve_place_removal', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji.id });
-  assert.equal(admin.passengers[0].pickup, null);
-  assert.equal(admin.passengers[0].dropoff, null);
-  assert.equal(admin.passengers[0].save_place, false);
-  await assert.rejects(rpc(db, 'resolve_place_removal', { p_code: code, p_admin_secret: admin_secret,
-                                                          p_passenger_id: minji.id }), /no_removal_request/);
+  assert.ok(minji.place_removed_at);
+  assert.equal(minji.pickup, null);
+  assert.equal(minji.dropoff, null);
+  assert.equal(minji.save_place, false);
+  await assert.rejects(rpc(db, 'forget_my_place', { p_code: code, p_device_key: device(9) }), /not_allowed/);
 
   // settling again keeps the result it replaces, with the reason
   const payload = (amount) => ({ total: 5000, shares: [{ passenger_id: minji.id, name: '민지', amount }] });

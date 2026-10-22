@@ -74,12 +74,6 @@ export default function DriverTrip() {
     }
   }
 
-  function resolveRemoval(id: string, name: string, approve: boolean) {
-    const ask = approve ? `${name} 님의 장소를 지울까요? 이미 남은 운행 기록은 지우지 않아요.` : `${name} 님의 삭제 요청을 거절할까요?`;
-    if (!window.confirm(ask)) return;
-    run(() => rpc('resolve_place_removal', { p_code: code, p_admin_secret: secret, p_passenger_id: id, p_approve: approve }));
-  }
-
   const cancel = () =>
     window.confirm('운행을 취소할까요? 동승자 링크도 닫혀요.') &&
     run(() => rpc('set_trip_status', { p_code: code, p_admin_secret: secret, p_status: 'cancelled' })).then(() => navigate('/'));
@@ -126,25 +120,9 @@ export default function DriverTrip() {
             </p>
             <p className="t-caption mt-0.5 text-sub">
               {p.place_removed_at && !p.pickup && !p.dropoff
-                ? '장소를 지웠어요'
+                ? `${p.name} 님이 장소를 지웠어요`
                 : `${p.pickup?.label ?? '출발지에서 탑승'} → ${p.dropoff?.label ?? '내릴 곳 미정'}`}
             </p>
-            {p.removal_requested_at && (
-              <div className="mt-2 flex flex-col gap-2">
-                <p className="t-caption text-brand">
-                  {p.name} 님이 내 장소 삭제를 요청했어요.{' '}
-                  {trip.status === 'settled' ? '운행 기록은 남고, 즐겨찾기에 남긴 장소만 지워져요' : '승인하면 남은 경로에서도 빠져요'}
-                </p>
-                <div className="flex gap-2">
-                  <Button variant="secondary" onClick={() => resolveRemoval(p.id, p.name, false)} className="h-10! flex-1">
-                    거절
-                  </Button>
-                  <Button onClick={() => resolveRemoval(p.id, p.name, true)} className="t-strong! h-10! flex-1">
-                    승인
-                  </Button>
-                </div>
-              </div>
-            )}
           </div>
         ))}
       </Card>
