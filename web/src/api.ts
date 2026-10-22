@@ -18,7 +18,8 @@ const messages: Record<string, string> = {
   name_required: '이름을 입력해 주세요.',
   place_needs_location: '장소는 검색 목록에서 골라 주세요.',
   verify_failed: '이름이나 번호가 맞지 않아요.',
-  too_many_attempts: '확인을 너무 많이 시도했어요. 운전자에게 다시 초대해 달라고 해 주세요.',
+  too_many_attempts: '확인을 너무 많이 시도했어요. 1시간 뒤에 다시 해 주세요.',
+  settle_done: '정산이 끝난 사람의 몫은 바꿀 수 없어요.',
   link_expired: '연결 코드가 만료됐어요. 차 화면에서 새 QR을 띄워 주세요.',
   carpool_not_found: '즐겨찾기 카풀을 찾을 수 없어요.',
   folder_not_found: '카풀 폴더를 찾을 수 없어요.',
@@ -246,7 +247,11 @@ export type FolderAdmin = {
     payments: { id: string; name: string; amount: number; trips: number; paid: boolean }[];
   }) | null;
   open: BatchSummary;
-  last_done: { done_at: string } | null;
+  last_done: {
+    done_at: string;
+    code: string;
+    payments: { id: string; name: string; amount: number; trips: number; paid: boolean }[];
+  } | null;
 };
 
 export type FolderItem = { code: string; name: string; status: BatchStatus; trips: number; amount: number };

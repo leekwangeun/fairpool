@@ -536,13 +536,15 @@ test('records are corrected, never deleted: removing my place during a trip and 
   assert.ok(!JSON.stringify(admin).includes('민지'), 'the name is gone from the record and the corrections');
   assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) })).me, null);
 
-  // wrong digits are counted (not rolled back with an error) and lock the page after 20 tries
-  for (let i = 0; i < 20; i++) {
-    const r = await rpc(db, 'verify_device', { p_code: code, p_device_key: device(5), p_name: '민지', p_phone4: '0000' });
-    assert.equal(r.error, 'verify_failed');
-  }
-  await assert.rejects(rpc(db, 'verify_device', { p_code: code, p_device_key: device(5), p_name: '민지', p_phone4: '1234' }),
-                       /too_many_attempts/);
+  // wrong digits are counted (not rolled back with an error): 5 an hour per phone, 30 an hour per page
+  const guess = (n) => rpc(db, 'verify_device', { p_code: code, p_device_key: device(n), p_name: '민지', p_phone4: '0000' });
+  for (let i = 0; i < 5; i++) assert.equal((await guess(5)).error, 'verify_failed');
+  await assert.rejects(guess(5), /too_many_attempts/, 'that phone waits an hour');
+  assert.equal((await guess(6)).error, 'verify_failed', 'another phone is not locked out by it');
+  for (let n = 7; n < 31; n++) await guess(n);
+  await assert.rejects(guess(40), /too_many_attempts/, '30 wrong tries close the page for an hour');
+  await db.query(`update public.verify_attempts set failed_at = failed_at - interval '61 minutes'`);
+  assert.equal((await guess(5)).error, 'verify_failed', 'and it opens again after the hour');
 });
 
 test('stops are cleared a day after the trip ends', async () => {

@@ -216,6 +216,29 @@ export default function FolderAdmin() {
 
       <TripList batch={batch} />
 
+      {/* a tick taken by mistake can be undone; the batch goes back to 정산 중 */}
+      {!req && folder.last_done && (
+        <Card className="gap-2">
+          <h2 className="t-strong">지난 정산 ({dayLabel(folder.last_done.done_at).split(' (')[0]} 완료)</h2>
+          {folder.last_done.payments.map((p) => (
+            <div key={p.id} className="flex items-center gap-2">
+              <span className="t-body min-w-0 flex-1 text-sub">
+                {p.name} {p.trips}회
+              </span>
+              <span className="t-body">{won(p.amount)}</span>
+              <span className="w-[22px] shrink-0">
+                <Checkbox
+                  checked={p.paid}
+                  onChange={(v) => markPaid(p.id, p.name, p.amount, v)}
+                  title={<span className="sr-only">정산 완료</span>}
+                />
+              </span>
+            </div>
+          ))}
+          <p className="t-caption text-faint">잘못 체크했다면 풀어 주세요. 그 묶음이 다시 정산 중이 돼요</p>
+        </Card>
+      )}
+
       {req && folder.open.trips.length > 0 && (
         <Card className="gap-1">
           <h2 className="t-strong">요청 뒤에 쌓인 운행 {folder.open.trips.length}회</h2>
