@@ -62,10 +62,17 @@ export default function SettlePage() {
   const sameEach = amounts.length > 1 && amounts.every((a) => a === amounts[0]);
   const first = me.rides[0];
   const sameCourse = first?.from && first.to && me.rides.every((r) => r.from === first.from && r.to === first.to);
-  // totals of the rides this person was in: the rest of each trip is the driver's part and other riders'
-  const total = me.rides.reduce((sum, r) => sum + r.total, 0);
-  const driver = me.rides.reduce((sum, r) => sum + r.driver, 0);
-  const others = total - me.amount - driver;
+  // the whole batch: "16회 총비용", "수진 (나)", "민호, 지은", "운전자 몫"
+  const batch = page.batch;
+  const total = batch?.total ?? me.rides.reduce((sum, r) => sum + r.total, 0);
+  const driver = batch?.driver_amount ?? me.rides.reduce((sum, r) => sum + r.driver, 0);
+  const others = batch?.others_amount ?? total - me.amount - driver;
+  // each ride: who rode along, and each one's share when it was more than me
+  const rides = me.rides.map((r) => ({
+    ...r,
+    title: r.people.map((x) => x.name).join(', ') || r.title,
+    sub: r.people.length > 1 ? r.people.map((x) => `${x.name} ${won(x.amount)}`).join(' | ') : undefined,
+  }));
 
   return (
     <Page gap={14}>
@@ -77,7 +84,8 @@ export default function SettlePage() {
           <BatchPill status={done ? 'done' : 'requested'} />
         </div>
         <p className="t-strong text-sub">
-          {page.name} {me.trips}회, {me.name} 분담액
+          {page.name} {batch ? `${batch.trips}회 중 ` : ''}
+          {me.trips}회, {me.name} 분담액
         </p>
         <Amount value={me.amount} />
         <p className="t-caption text-sub">
@@ -87,13 +95,13 @@ export default function SettlePage() {
       </Card>
 
       <Card className="gap-2.5">
-        <AmountRow strong label={`${me.trips}회 총비용`} amount={total} />
-        <AmountRow label={me.name} amount={me.amount} />
+        <AmountRow strong label={`${batch?.trips ?? me.trips}회 총비용`} amount={total} />
+        <AmountRow label={`${me.name} (나)`} amount={me.amount} />
+        {others > 0 && <AmountRow label={batch?.others.join(', ') || '함께 탄 다른 사람'} amount={others} />}
         {driver > 0 && <AmountRow label="운전자 몫" amount={driver} />}
-        {others > 0 && <AmountRow label="함께 탄 다른 사람 몫" amount={others} />}
       </Card>
 
-      <RideList title="운행별 내역" rides={me.rides} shown={3} />
+      <RideList title="운행별 내역" rides={rides} shown={3} />
 
       {done ? (
         <section className="flex w-full flex-col gap-1 rounded-[20px] bg-[#e3f7eb] px-[18px] py-4">

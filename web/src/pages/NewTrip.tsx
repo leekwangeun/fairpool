@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rpc, ruleName, type Place, type Rule } from '../api';
 import { store } from '../store';
-import { Button, Card, Checkbox, ErrorText, Field, OptionCard, Page, PlaceSearch, TextInput } from '../ui';
+import { Button, Card, CarStandIn, Checkbox, ErrorText, Field, OptionCard, Page, PlaceSearch, TextInput } from '../ui';
 
 // Every trip gets its own code, its own passenger page (/t/CODE) and its own QR.
 // On the car this happens on the L1/L2 screens; this page is the phone version for preparing ahead.
@@ -40,6 +40,7 @@ export default function NewTrip() {
 
   return (
     <Page back="/">
+      <CarStandIn />
       <h1 className="t-title">새 운행 만들기</h1>
       <Card className="gap-[18px]">
         <Field label="운행 이름">

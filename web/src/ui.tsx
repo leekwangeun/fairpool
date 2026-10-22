@@ -60,6 +60,15 @@ export function Page({
   );
 }
 
+// Demo mode only: the driver pages stand in for the car screen, where trips are made and changed.
+export function CarStandIn() {
+  return (
+    <p className="t-caption w-full rounded-xl bg-amber-50 px-3.5 py-2.5 text-amber-800">
+      시연용 차 화면 대역이에요. 실제로는 운행을 차 화면(주차 중)에서만 만들고 고쳐요
+    </p>
+  );
+}
+
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`flex w-full flex-col rounded-[20px] bg-card p-5 shadow-card ${className}`}>{children}</section>;
 }
@@ -328,7 +337,15 @@ export function Amount({ value }: { value: number }) {
 }
 
 // Newest rides first; the rest folds into "10월 1일 ~ 10월 8일 5회 더 보기".
-export function RideList({ title, rides, shown }: { title: string; rides: { date: string; title: string; amount: number }[]; shown: number }) {
+export function RideList({
+  title,
+  rides,
+  shown,
+}: {
+  title: string;
+  rides: { date: string; title: string; amount: number; sub?: string }[];
+  shown: number;
+}) {
   const [all, setAll] = useState(false);
   const rest = rides.slice(shown);
   const visible = all ? rides : rides.slice(0, shown);
@@ -336,7 +353,10 @@ export function RideList({ title, rides, shown }: { title: string; rides: { date
     <Card className="gap-2.5">
       <h2 className="t-strong">{title}</h2>
       {visible.map((r, i) => (
-        <AmountRow key={i} label={`${dayLabel(r.date)} ${r.title}`} amount={r.amount} />
+        <div key={i} className="flex flex-col gap-0.5">
+          <AmountRow label={`${dayLabel(r.date)} ${r.title}`} amount={r.amount} />
+          {r.sub && <span className="t-caption text-faint">{r.sub}</span>}
+        </div>
       ))}
       {!all && rest.length > 0 && (
         <button type="button" onClick={() => setAll(true)} className="t-caption text-left text-brand">

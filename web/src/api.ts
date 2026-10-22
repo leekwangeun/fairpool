@@ -13,6 +13,7 @@ const messages: Record<string, string> = {
   trip_closed: '이미 끝난 운행이에요.',
   join_closed: '이미 출발한 운행이에요. 차가 멈추면 운전자에게 차 화면의 QR을 다시 띄워 달라고 해 주세요.',
   trip_full: '자리가 모두 찼어요.',
+  bad_seats: '함께 탈 사람은 1명에서 4명까지예요.',
   not_allowed: '이 운행을 관리할 권한이 없어요.',
   name_required: '이름을 입력해 주세요.',
   place_needs_location: '장소는 검색 목록에서 골라 주세요.',
@@ -148,7 +149,8 @@ export type Settlement = {
 };
 
 export type Stop = {
-  kind: 'start' | 'my_pickup' | 'my_dropoff' | 'other_pickup' | 'other_dropoff';
+  // other_stop: a place the driver stops at, shown without where it is
+  kind: 'start' | 'my_pickup' | 'my_dropoff' | 'other_pickup' | 'other_dropoff' | 'other_stop';
   label?: string;
   time?: string;
   eta_min?: number;
@@ -220,8 +222,14 @@ export type SettlePage = {
     amount: number;
     trips: number;
     paid: boolean;
-    rides: { date: string; title: string; amount: number; from?: string; to?: string; km?: number; total: number; driver: number }[];
+    rides: {
+      date: string; title: string; amount: number; from?: string; to?: string; km?: number; total: number; driver: number;
+      // who rode along and each one's share (M6); places only for this rider
+      people: { name: string; amount: number; is_me: boolean }[];
+    }[];
   } | null;
+  // the batch as a whole ("16회 중 14회", "민호, 지은 23,610원"); only for someone who rode
+  batch: { trips: number; total: number; driver_amount: number; others: string[]; others_amount: number } | null;
   bank: Bank | null;
 };
 

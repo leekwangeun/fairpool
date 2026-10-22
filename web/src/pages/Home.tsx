@@ -1,11 +1,59 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ApiError, rpc, type Driver, type FolderItem } from '../api';
+import { ApiError, demoMode, rpc, type Driver, type FolderItem } from '../api';
 import { store } from '../store';
-import { BatchPill, Button, Card, ErrorText, Field, Page, StatusPill, TextInput, won } from '../ui';
+import { BatchPill, Button, Card, CarStandIn, ErrorText, Field, Page, StatusPill, TextInput, won } from '../ui';
 
-// Driver home: start a new trip, re-create a saved carpool, carpool folders, recent trips.
+// Trips are made and changed on the car screen only (parked). The driver's phone links the car and
+// passes on what the car sends ("내 휴대폰으로 보내기", M1-2); in demo mode the old driver pages stand in
+// for the car screen.
 export default function Home() {
+  return demoMode ? <CarScreenStandIn /> : <PhoneHome />;
+}
+
+function PhoneHome() {
+  const [linked, setLinked] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    const secret = store.driverSecret();
+    if (!secret) return setLinked(false);
+    rpc<Driver>('get_driver', { p_driver_secret: secret })
+      .then((d) => setLinked(d.vehicles > 0))
+      .catch((e) => {
+        if (e instanceof ApiError && e.code === 'not_allowed') store.setDriverSecret(null);
+        setLinked(false);
+      });
+  }, []);
+
+  return (
+    <Page>
+      <div className="pt-6">
+        <h1 className="text-2xl font-bold leading-snug">
+          함께 타는 길,
+          <br />
+          기름값은 공정하게
+        </h1>
+        <p className="mt-2 text-[15px] text-sub">운행은 차 화면에서 만들어요. 회원가입은 없어요.</p>
+      </div>
+      <Card className="gap-2">
+        <h2 className="t-strong">동승자라면</h2>
+        <p className="t-body text-sub">운전자가 보낸 링크나 차 안의 QR로 들어오면 돼요.</p>
+      </Card>
+      <Card className="gap-2">
+        <h2 className="t-strong">운전자라면</h2>
+        <p className="t-body text-sub">
+          {linked
+            ? '이 휴대폰은 차와 연결돼 있어요. 차 화면에서 "내 휴대폰으로 보내기"를 누른 뒤 그 초대나 정산 링크를 열고, 차에 넣은 이름과 번호 뒤 4자리로 확인하면 동승자에게 보낼 수 있어요.'
+            : '차 화면의 연결 QR을 이 휴대폰으로 찍으면 연결돼요. 운전자 이름, 번호 뒤 4자리, 받을 계좌는 주차 중 차 화면에서 넣어요.'}
+        </p>
+      </Card>
+    </Page>
+  );
+}
+
+// Demo mode only: start a new trip, re-create a saved carpool, carpool folders, recent trips, as the
+// car screen would (L1).
+function CarScreenStandIn() {
   const navigate = useNavigate();
   const [driver, setDriver] = useState<Driver | null>(null);
   const [loading, setLoading] = useState(true);
@@ -87,6 +135,7 @@ export default function Home() {
   if (!driver) {
     return (
       <Page>
+        <CarStandIn />
         <div className="pt-6">
           <h1 className="text-2xl font-bold leading-snug">
             함께 타는 길,
@@ -113,6 +162,7 @@ export default function Home() {
 
   return (
     <Page>
+      <CarStandIn />
       <h1 className="pt-2 text-2xl font-bold">
         <button type="button" onClick={rename} className="text-left">
           {driver.display_name}님

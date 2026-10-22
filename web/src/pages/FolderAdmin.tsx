@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { demoMode, issueLabel, rpc, type BatchSummary, type FolderAdmin as Folder } from '../api';
 import { settleLink, store } from '../store';
-import { BatchPill, Button, Card, Checkbox, ErrorText, Page, QrImage, copyText, dayLabel, usePolling, won } from '../ui';
+import { BatchPill, Button, Card, CarStandIn, Checkbox, ErrorText, Page, QrImage, copyText, dayLabel, usePolling, won } from '../ui';
 
 // Driver view of one carpool folder, like the car screens L1-6 (요청 전) and L1-7 (정산 중):
 // the stacked trips, what each passenger owes, and the request / received buttons.
@@ -89,6 +89,7 @@ export default function FolderAdmin() {
 
   return (
     <Page back="/" gap={14}>
+      <CarStandIn />
       <Card className="gap-1">
         <div className="flex items-center gap-2">
           <p className="t-caption text-brand">카풀 폴더 | {folder.name}</p>

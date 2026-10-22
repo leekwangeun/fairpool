@@ -31,9 +31,9 @@ export default function VehicleLink() {
       <h1 className="pt-2 text-2xl font-bold">차와 연결하기</h1>
       {done ? (
         <Card className="flex flex-col gap-3">
-          <p>연결됐어요. 이제 여기서 만든 운행을 차 화면에서 바로 불러올 수 있어요.</p>
+          <p>연결됐어요. 차 화면에서 "내 휴대폰으로 보내기"를 누르면 그 초대와 정산을 이 휴대폰에서 동승자에게 보낼 수 있어요.</p>
           <Link to="/" className="font-semibold text-brand">
-            운행 만들러 가기
+            처음 화면으로
           </Link>
         </Card>
       ) : (

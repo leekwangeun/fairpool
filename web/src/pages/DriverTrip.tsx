@@ -6,6 +6,7 @@ import {
   BatchPill,
   Button,
   Card,
+  CarStandIn,
   Checkbox,
   ErrorText,
   Page,
@@ -106,6 +107,7 @@ export default function DriverTrip() {
 
   return (
     <Page back="/">
+      <CarStandIn />
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="t-title">{trip?.title ?? '운행'}</h1>
