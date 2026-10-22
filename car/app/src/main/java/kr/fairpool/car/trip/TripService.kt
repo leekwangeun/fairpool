@@ -32,28 +32,35 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import kr.fairpool.car.data.Place
+import java.util.concurrent.ConcurrentHashMap
 
 /** Thin wrapper so the engine can ask the stock navi for a route without knowing NaviHelper types. */
 class NaviBridge(context: Context) {
     private val navi = NaviHelper(context)
+    // NaviHelper calls back on binder threads; everything here runs on the main thread
+    private val main = Handler(Looper.getMainLooper())
     private var ready = false
     private var pending: (() -> Unit)? = null
 
     init {
         navi.addListener(object : NaviHelperEventListener {
             override fun onRouteStarted(info: RouteStartInfo) {
-                TripEngine.onToll(info.tollFare.toLong())
-                TripEngine.log("내비 안내 시작: ${info.distance / 1000.0}km, 통행료 ${info.tollFare}원")
+                main.post {
+                    TripEngine.onToll(info.tollFare.toLong())
+                    TripEngine.log("내비 안내 시작: ${info.distance / 1000.0}km, 통행료 ${info.tollFare}원")
+                }
             }
         })
         navi.initialize(
             onConnected = {
-                ready = true
-                TripEngine.log("내비 연결됨")
-                pending?.invoke()
-                pending = null
+                main.post {
+                    ready = true
+                    TripEngine.log("내비 연결됨")
+                    pending?.invoke()
+                    pending = null
+                }
             },
-            onFailed = { t -> TripEngine.log("내비 연결 실패: ${t.message}") }
+            onFailed = { t -> main.post { TripEngine.log("내비 연결 실패: ${t.message}") } }
         )
     }
 
@@ -71,7 +78,7 @@ class NaviBridge(context: Context) {
                 TripEngine.log("내비 경로 요청 실패: ${e.message}")
             }
         }
-        if (ready) send() else pending = send
+        main.post { if (ready) send() else pending = send }
     }
 
     /** "내비에서 보기": brings the stock navi forward on its route overview. */
@@ -108,8 +115,12 @@ class TripService : Service() {
             .build()
         startForeground(1, n)
 
-        vehicle = Vehicle(applicationContext).also { it.initialize() }
-        if (TripEngine.navi == null) TripEngine.navi = NaviBridge(applicationContext)
+        vehicle = runCatching { Vehicle(applicationContext).also { it.initialize() } }
+            .onFailure { TripEngine.log("차량 SDK 연결 실패: ${it.message}") }.getOrNull()
+        if (TripEngine.navi == null) {
+            TripEngine.navi = runCatching { NaviBridge(applicationContext) }
+                .onFailure { TripEngine.log("내비 연결 실패: ${it.message}") }.getOrNull()
+        }
         main.postDelayed({ register() }, 1500)
     }
 
@@ -125,18 +136,35 @@ class TripService : Service() {
         SeatSlot.REAR_LEFT to DoorValue.ROW_2_LEFT,
         SeatSlot.REAR_RIGHT to DoorValue.ROW_2_RIGHT
     )
-    private val occupancy = mutableMapOf<SeatSlot, Boolean>()
-    private val belt = mutableMapOf<SeatSlot, Boolean>()
+    private val occupancy = ConcurrentHashMap<SeatSlot, Boolean>()
+    private val belt = ConcurrentHashMap<SeatSlot, Boolean>()
 
     /** A seat counts as taken when its occupancy sensor or its seat belt says so (rear seats may lack a sensor). */
     private fun seatChanged(slot: SeatSlot) {
         main.post { TripEngine.onSeat(slot, occupancy[slot] == true || belt[slot] == true) }
     }
 
+    /** Each sensor on its own: one the car does not offer must not take the others (or the app) down. */
+    private fun guarded(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Exception) {
+            fail(what, e)
+        }
+    }
+
     private fun register() {
         val v = vehicle ?: return
+        guarded("좌석") { registerSeats(v) }
+        guarded("문") { registerDoors(v) }
+        guarded("주행거리") { registerOdometer(v) }
+        guarded("기어") { registerGear(v) }
+        guarded("연비") { registerFuel(v) }
+        TripEngine.log("차량 센서 연결: 좌석 3, 문 3, 주행거리, 기어, 연비")
+    }
+
+    private fun registerSeats(v: Vehicle) {
         val seat = v.getSeat()
-        val door = v.getDoor()
         for ((slot, value) in seatValues) {
             val area = SeatArea(value)
             seat.registerSeatOccupancy(area, object : SeatOccupancyListener {
@@ -156,6 +184,10 @@ class TripService : Service() {
             seat.getCurrentSeatOccupancy(area, { occ -> occupancy[slot] = occ == true; seatChanged(slot) }, { })
             seat.getCurrentSeatBeltBuckledState(area, { b -> belt[slot] = b == true; seatChanged(slot) }, { })
         }
+    }
+
+    private fun registerDoors(v: Vehicle) {
+        val door = v.getDoor()
         for ((slot, value) in doorValues) {
             door.registerDoorPosition(DoorArea(value), object : DoorPositionListener {
                 override fun onPositionUpdated(pos: Int?) {
@@ -164,6 +196,9 @@ class TripService : Service() {
                 override fun onFailed(e: Exception) = fail("문 ${slot.label}", e)
             })
         }
+    }
+
+    private fun registerOdometer(v: Vehicle) {
         v.getOdometer().registerDistanceDriven(object : DistanceDrivenListener {
             override fun onDistanceDrivenUpdated(km: Float?) {
                 if (km != null) main.post { TripEngine.onOdometer(km.toDouble()) }
@@ -171,6 +206,9 @@ class TripService : Service() {
             override fun onFailed(e: Exception) = fail("주행거리", e)
         })
         v.getOdometer().getCurrentDistanceDriven({ km -> if (km != null) main.post { TripEngine.onOdometer(km.toDouble()) } }, { })
+    }
+
+    private fun registerGear(v: Vehicle) {
         v.getGear().registerGearSelection(object : GearSelectionListener {
             override fun onSelected(gear: VehicleGear?) {
                 main.post { TripEngine.onGear(gear?.name ?: "?") }
@@ -178,12 +216,14 @@ class TripService : Service() {
             override fun onFailed(e: Exception) = fail("기어", e)
         })
         v.getGear().getCurrentGearSelectionState({ g -> main.post { TripEngine.onGear(g?.name ?: "?") } }, { })
+    }
+
+    private fun registerFuel(v: Vehicle) {
         v.getFuel().registerInstantaneousFuelEconomy(object : FuelEconomyListener {
             override fun onFuelEconomyUpdated(value: Float?) {}
             override fun onFailed(e: Exception) {}
         })
         v.getFuel().getCurrentFuelEconomy({ e -> if (e != null) main.post { TripEngine.onEfficiency(e.toDouble()) } }, { })
-        TripEngine.log("차량 센서 연결: 좌석 3, 문 3, 주행거리, 기어, 연비")
     }
 
     private fun fail(what: String, e: Exception) {
@@ -191,7 +231,9 @@ class TripService : Service() {
     }
 
     override fun onDestroy() {
+        main.removeCallbacksAndMessages(null)
         runCatching { vehicle?.release() }
+        vehicle = null
         super.onDestroy()
     }
 

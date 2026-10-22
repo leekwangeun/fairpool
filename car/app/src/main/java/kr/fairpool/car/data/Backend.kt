@@ -157,7 +157,7 @@ object DemoBackend {
         "get_bank_account" -> bank ?: JSONObject()
         "set_bank_account" -> {
             bank = if (a.optBoolean("p_consent")) JSONObject().put("bank_name", a.optString("p_bank_name"))
-                .put("bank_account", a.optString("p_bank_account")).put("account_holder", a.optString("p_account_holder"))
+                .put("account", a.optString("p_bank_account")).put("holder", a.optString("p_account_holder"))
             else null
             bank ?: JSONObject()
         }

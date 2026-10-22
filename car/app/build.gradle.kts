@@ -16,6 +16,8 @@ android {
         applicationId = "kr.fairpool.car"
         minSdk = 28
         targetSdk = 35
+        // the car (x86_64 emulator, arm64 head units) needs only these; keeps the MapLibre APK small
+        ndk { abiFilters += listOf("x86_64", "arm64-v8a") }
         versionCode = 1
         versionName = "0.1.0"
 
@@ -56,6 +58,8 @@ dependencies {
     implementation("ai.pleos.playground:NaviHelper:3.0.5")
     implementation("org.jetbrains.kotlin:kotlin-reflect:2.0.21")
     implementation("com.google.zxing:core:3.5.3")
+    implementation("org.maplibre.gl:android-sdk:11.13.5")
+    implementation("com.google.code.gson:gson:2.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     implementation("androidx.core:core-ktx:1.13.1")

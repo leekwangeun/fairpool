@@ -10,6 +10,11 @@ import kr.fairpool.car.settlement.Settlement
 import kr.fairpool.car.settlement.Shapley
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -62,6 +67,7 @@ data class TripState(
     val adminSecret: String = "",
     val title: String = "",
     val includeDriver: Boolean = true,
+    val rule: String = "shapley",
     val origin: Place? = null,
     val destination: Place? = null,
     val seats: Int = 3,
@@ -79,6 +85,7 @@ data class TripState(
     val card: PendingCard? = null,
     val allocation: Allocation? = null,
     val settlementMethod: String = "",
+    val settlementKm: Double = 0.0,
     val settlementPosted: Boolean = false,
     val log: List<String> = emptyList(),
     val error: String? = null
@@ -108,21 +115,28 @@ object TripEngine {
 
     fun log(msg: String) {
         Log.i(TAG, msg)
-        _state.update { it.copy(log = (it.log + "${time.format(Date())} $msg").takeLast(40)) }
+        val stamp = synchronized(time) { time.format(Date()) }
+        _state.update { it.copy(log = (it.log + "$stamp $msg").takeLast(40)) }
     }
 
+    /** Back to no trip; sensor readings stay because the SDK only reports changes. */
     fun reset() {
-        _state.value = TripState()
+        routeJob?.cancel()
+        _state.value = sensorsOnly(_state.value)
     }
+
+    private fun sensorsOnly(s: TripState) = TripState(
+        seatOccupied = s.seatOccupied, doorOpen = s.doorOpen, gear = s.gear,
+        odometerKm = s.odometerKm, efficiencyKmL = s.efficiencyKmL, log = s.log
+    )
 
     // ---- trip lifecycle -------------------------------------------------------------------------------
 
-    fun startInvite(code: String, adminSecret: String, title: String, origin: Place, destination: Place, seats: Int, includeDriver: Boolean) {
-        _state.value = TripState(
+    fun startInvite(code: String, adminSecret: String, title: String, origin: Place, destination: Place, seats: Int,
+                    includeDriver: Boolean, rule: String = "shapley") {
+        _state.value = sensorsOnly(_state.value).copy(
             phase = Phase.INVITE, code = code, adminSecret = adminSecret, title = title,
-            origin = origin, destination = destination, seats = seats, includeDriver = includeDriver,
-            seatOccupied = _state.value.seatOccupied, doorOpen = _state.value.doorOpen,
-            gear = _state.value.gear, odometerKm = _state.value.odometerKm, efficiencyKmL = _state.value.efficiencyKmL
+            origin = origin, destination = destination, seats = seats, includeDriver = includeDriver, rule = rule
         )
         log("운행 $code 준비")
     }
@@ -220,7 +234,7 @@ object TripEngine {
         val starters = s0.passengers.filter { it.pickup == null || origin.distanceKm(it.pickup) <= 0.3 }
         _state.update { s ->
             s.copy(
-                phase = Phase.DRIVING, startOdometerKm = km,
+                phase = Phase.DRIVING, startOdometerKm = s0.odometerKm,
                 passengers = s.passengers.map { p ->
                     if (starters.any { it.id == p.id }) p.copy(boarded = true, boardKm = km, boardPlace = origin) else p
                 },
@@ -249,22 +263,48 @@ object TripEngine {
         log("내비 경로: " + (wps.map { it.name } + "→ ${dest.name}").joinToString(" "))
     }
 
+    private var routeJob: Job? = null
+
+    /**
+     * The stock navi comes to the front whenever it gets a new route, which would hide the L5 card.
+     * So after a stop the next leg goes out once the card has had its time (and an undo can still change it).
+     */
+    private fun sendRouteSoon(delayMs: Long = 10_000) {
+        routeJob?.cancel()
+        routeJob = scope.launch {
+            delay(delayMs)
+            if (_state.value.phase == Phase.DRIVING) sendRoute()
+        }
+    }
+
     // ---- sensor input ---------------------------------------------------------------------------------
 
     fun onGear(gear: String) {
-        _state.update { it.copy(gear = gear) }
+        val short = when {
+            gear.contains("PARK") -> "P"
+            gear.contains("REVERSE") -> "R"
+            gear.contains("NEUTRAL") -> "N"
+            gear.contains("DRIVE") -> "D"
+            else -> gear
+        }
+        _state.update { it.copy(gear = short) }
     }
 
     fun onSpeed(kmh: Float) = _state.update { it.copy(speedKmh = kmh) }
 
-    fun onOdometer(km: Double) = _state.update { it.copy(odometerKm = km) }
+    fun onOdometer(km: Double) = _state.update {
+        // the first reading after departure (if none had come yet) becomes the starting point
+        if (it.phase == Phase.DRIVING && it.startOdometerKm == null) it.copy(odometerKm = km, startOdometerKm = km)
+        else it.copy(odometerKm = km)
+    }
 
     fun onEfficiency(kmL: Double) {
         if (kmL > 1) _state.update { it.copy(efficiencyKmL = kmL) }
     }
 
     fun onToll(won: Long) {
-        if (won > 0) _state.update { it.copy(toll = won) }
+        // every re-route quotes the toll still ahead; the largest quote covers the tolled stretch
+        if (won > 0) _state.update { it.copy(toll = maxOf(it.toll, won)) }
     }
 
     fun onDoor(slot: SeatSlot, open: Boolean) {
@@ -278,8 +318,15 @@ object TripEngine {
         if (before == occupied) return
         log("${slot.label} ${if (occupied) "착석" else "비움"}")
         val s = _state.value
-        if (s.phase != Phase.DRIVING || s.speedKmh > 3f) return
+        // only while stopped: a belt or seat flicker on the move is not someone getting in or out
+        if (s.phase != Phase.DRIVING || s.speedKmh > 3f || s.gear == "D" || s.gear == "R") return
         if (occupied) {
+            // someone recorded by hand without a seat just sat down: give them the seat, nobody new boarded
+            val seatless = s.passengers.firstOrNull { it.boarded && !it.alighted && it.seat == null }
+            if (seatless != null && s.passengers.none { it.seat == slot && it.boarded && !it.alighted }) {
+                assignSeat(seatless.id, slot)
+                return
+            }
             val due = s.plan.firstOrNull { !it.done && it.kind == "pickup" }
                 ?.let { st -> s.passengers.firstOrNull { it.id == st.passengerId } }
                 ?: s.passengers.firstOrNull { !it.boarded }
@@ -310,7 +357,7 @@ object TripEngine {
                 "p_seat" to (slot ?: p.seat)?.code, "p_boarded" to true, "p_unchecked" to unchecked))
             pushProgress()
         }
-        if (s.plan.firstOrNull { !it.done }?.passengerId == passengerId) sendRoute()
+        if (s.plan.firstOrNull { !it.done }?.passengerId == passengerId) sendRouteSoon()
     }
 
     fun alight(passengerId: String, unchecked: Boolean = false) {
@@ -332,7 +379,7 @@ object TripEngine {
                 "p_alighted" to true, "p_unchecked" to unchecked))
             pushProgress()
         }
-        sendRoute()
+        sendRouteSoon()
     }
 
     /** L5 "잘못 인식": undoes the last automatic boarding or alighting of that passenger. */
@@ -361,7 +408,7 @@ object TripEngine {
             call("mark_passenger", args("p_code" to s.code, "p_admin_secret" to s.adminSecret, "p_passenger_id" to card.passengerId, key to false))
             pushProgress()
         }
-        sendRoute()
+        sendRouteSoon()
     }
 
     fun dismissCard() = _state.update { it.copy(card = null) }
@@ -369,6 +416,7 @@ object TripEngine {
     fun arrive() {
         val s = _state.value
         s.passengers.filter { it.boarded && !it.alighted }.forEach { alight(it.id, unchecked = true) }
+        routeJob?.cancel()
         _state.update { it.copy(phase = Phase.ARRIVED, card = null) }
         log("도착: 주행 ${"%.1f".format(_state.value.drivenKm)}km")
     }
@@ -391,11 +439,18 @@ object TripEngine {
             "p_progress" to JSONObject().put("stops", stops)))
     }
 
-    private suspend fun call(fn: String, a: JSONObject): JSONObject? = try {
-        rpc?.call(fn, a)
-    } catch (e: Exception) {
-        log("서버 $fn 실패: ${e.message}")
-        null
+    /** One call at a time, in the order the car recorded things (an undo must not overtake its boarding). */
+    private val serverLine = Mutex()
+
+    private suspend fun call(fn: String, a: JSONObject): JSONObject? = serverLine.withLock {
+        try {
+            rpc?.call(fn, a)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("서버 $fn 실패: ${e.message}")
+            null
+        }
     }
 
     // ---- settlement -----------------------------------------------------------------------------------
@@ -433,7 +488,8 @@ object TripEngine {
         val full = (1 shl n) - 1
         val raw = DoubleArray(1 shl n)
         try {
-            for (mask in 1..full) {
+            // N분의 1 needs only the whole course; the shares come from the group distances otherwise
+            for (mask in if (s.rule == "equal") listOf(full) else (1..full).toList()) {
                 val pts = seq.filter { mask and (1 shl it.owner) != 0 }.map { it.place }
                 raw[mask] = routeKm(pts)
             }
@@ -462,11 +518,19 @@ object TripEngine {
             }
             segments += ((s.odometerKm ?: lastKm) - lastKm).coerceAtLeast(0.0) to aboard
             shareKm = Shapley.fixedRoute(n, segments)
-            actualKm = s.drivenKm
+            // no odometer movement (emulator, sensor fault): straight-line course with a road factor
+            actualKm = s.drivenKm.takeIf { it > 0.5 }
+                ?: (seq.zipWithNext { a, b -> a.place.distanceKm(b.place) }.sum() * 1.3)
             aloneKm = DoubleArray(n) { i -> segments.filter { it.second and (1 shl i) != 0 }.sumOf { it.first } }
         }
-        val allocation = Settlement.allocate(riders, shareKm, aloneKm, actualKm, fuelPerKm, s.toll, tollPayers, s.includeDriver, method)
-        _state.update { it.copy(allocation = allocation, settlementMethod = method) }
+        val allocation = if (s.rule == "equal") {
+            // N분의 1: the whole cost split evenly over the passengers, no going-alone cap
+            Settlement.allocate(riders, DoubleArray(n) { 1.0 }, DoubleArray(n) { 1e9 }, actualKm, fuelPerKm, s.toll,
+                riders.indices.toSet(), false, "equal")
+        } else {
+            Settlement.allocate(riders, shareKm, aloneKm, actualKm, fuelPerKm, s.toll, tollPayers, s.includeDriver, method)
+        }
+        _state.update { it.copy(allocation = allocation, settlementMethod = method, settlementKm = actualKm) }
         allocation
     }
 
@@ -477,16 +541,17 @@ object TripEngine {
             val p = s.passengers.firstOrNull { it.id == sh.rider.id }
             val o = JSONObject().put("passenger_id", sh.rider.id ?: JSONObject.NULL).put("name", sh.rider.name)
                 .put("role", if (sh.rider.isDriver) "driver" else "passenger").put("amount", sh.amount)
-                .put("share_km", round1(sh.shareKm)).put("alone", sh.alone)
+                .put("share_km", round1(sh.shareKm)).put("alone", if (a.method == "equal") sh.amount else sh.alone)
             if (p != null) {
                 o.put("km", round1(((p.alightKm ?: 0.0) - (p.boardKm ?: 0.0)).coerceAtLeast(0.0)))
                 o.put("from", p.boardPlace?.label ?: "").put("to", p.alightPlace?.label ?: "")
             }
             shares.put(o)
         }
-        return JSONObject().put("rule", if (a.method == "shapley") "shapley" else "segment_split")
+        val rule = when (a.method) { "shapley" -> "shapley"; "equal" -> "equal"; else -> "segment_split" }
+        return JSONObject().put("rule", rule)
             .put("include_driver", s.includeDriver).put("total", a.total).put("toll", a.toll)
-            .put("fuel", JSONObject().put("distance_km", round1(s.drivenKm)).put("efficiency_km_l", round1(s.efficiencyKmL ?: 12.0))
+            .put("fuel", JSONObject().put("distance_km", round1(s.settlementKm)).put("efficiency_km_l", round1(s.efficiencyKmL ?: 12.0))
                 .put("amount", a.fuelAmount))
             .put("shares", shares)
     }

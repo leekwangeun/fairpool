@@ -50,6 +50,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -61,6 +63,7 @@ import kr.fairpool.car.data.Place
 import kr.fairpool.car.data.Rpc
 import kr.fairpool.car.data.RpcException
 import kr.fairpool.car.data.args
+import kr.fairpool.car.map.CourseMap
 import kr.fairpool.car.trip.Phase
 import kr.fairpool.car.trip.SeatSlot
 import kr.fairpool.car.trip.TripEngine
@@ -193,8 +196,9 @@ private fun Qr(content: String, sizeDp: Int) {
 }
 
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun Field(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, hidden: Boolean = false) {
     OutlinedTextField(value, onChange, label = { Text(label, fontSize = 16.sp) }, singleLine = true,
+        visualTransformation = if (hidden) PasswordVisualTransformation() else VisualTransformation.None,
         textStyle = androidx.compose.ui.text.TextStyle(fontSize = 20.sp), modifier = modifier.fillMaxWidth())
 }
 
@@ -236,7 +240,14 @@ private fun App(config: Config, rpc: Rpc) {
     }
     // keep the screen in step if the engine moved on (e.g. after a restart)
     LaunchedEffect(trip.phase) {
-        if (trip.phase == Phase.DRIVING && screen != Screen.DRIVING) screen = Screen.DRIVING
+        val want = when (trip.phase) {
+            Phase.INVITE -> Screen.INVITE
+            Phase.SEATS -> Screen.SEATS
+            Phase.DRIVING -> Screen.DRIVING
+            Phase.ARRIVED, Phase.SETTLED -> Screen.SETTLE
+            Phase.IDLE -> null
+        }
+        if (want != null && screen != want) screen = want
     }
 }
 
@@ -328,7 +339,7 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             Field("휘발유 단가 (원/L)", price, { price = it.filter(Char::isDigit) })
             Spacer(Modifier.height(12.dp))
-            Field("차 비밀값 (이미 등록한 차를 쓸 때)", secret, { secret = it.trim() })
+            Field("차 비밀값 (이미 등록한 차를 쓸 때)", secret, { secret = it.trim() }, hidden = true)
             Spacer(Modifier.height(16.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(demo, { demo = it })
@@ -361,6 +372,7 @@ private fun DriverScreen(config: Config, rpc: Rpc, onBack: () -> Unit) {
     var account by remember { mutableStateOf("") }
     var holder by remember { mutableStateOf("") }
     var consent by remember { mutableStateOf(false) }
+    var phone4Saved by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf("") }
     val secret = config.vehicleSecret
     LaunchedEffect(Unit) {
@@ -368,7 +380,8 @@ private fun DriverScreen(config: Config, rpc: Rpc, onBack: () -> Unit) {
             val d = rpc.call("get_driver_info", args("p_vehicle_secret" to secret))
             name = d.optString("name")
             val b = rpc.call("get_bank_account", args("p_vehicle_secret" to secret))
-            bankName = b.optString("bank_name"); account = b.optString("bank_account"); holder = b.optString("account_holder")
+            bankName = b.optString("bank_name"); account = b.optString("account"); holder = b.optString("holder")
+            phone4Saved = d.optBoolean("phone4_set")
             consent = account.isNotEmpty()
         }
     }
@@ -381,7 +394,8 @@ private fun DriverScreen(config: Config, rpc: Rpc, onBack: () -> Unit) {
                 Spacer(Modifier.height(20.dp))
                 Field("이름", name, { name = it })
                 Spacer(Modifier.height(12.dp))
-                Field("휴대폰 번호 뒤 4자리", phone4, { phone4 = it.filter(Char::isDigit).take(4) })
+                Field(if (phone4Saved) "휴대폰 번호 뒤 4자리 (저장됨, 바꿀 때만 입력)" else "휴대폰 번호 뒤 4자리", phone4,
+                    { phone4 = it.filter(Char::isDigit).take(4) }, hidden = true)
             }
             Card(Modifier.weight(1f).fillMaxHeight()) {
                 Title("정산 받을 계좌", 28)
@@ -470,7 +484,7 @@ private fun HomeScreen(
                         }
                         Stepper("-") { if (seats > 1) seats-- }
                         Text("${seats}명", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 20.dp))
-                        Stepper("+") { if (seats < 4) seats++ }
+                        Stepper("+") { if (seats < SeatSlot.entries.size) seats++ }
                     }
                 }
                 Spacer(Modifier.height(18.dp))
@@ -527,7 +541,7 @@ private fun HomeScreen(
                         "p_title" to title, "p_origin" to origin.json(), "p_destination" to destination.json(),
                         "p_include_driver" to r.includeDriver, "p_seats" to seats, "p_rule" to r.rule,
                         "p_vehicle_secret" to secret))
-                    TripEngine.startInvite(res.optString("code"), res.optString("admin_secret"), title, origin, destination, seats, r.includeDriver)
+                    TripEngine.startInvite(res.optString("code"), res.optString("admin_secret"), title, origin, destination, seats, r.includeDriver, r.rule)
                     onStart()
                 } catch (e: Exception) {
                     onMessage("운행을 만들지 못했어요: ${e.message}")
@@ -750,19 +764,27 @@ private fun DrivingScreen(onArrive: () -> Unit) {
                     Body(next?.place?.area ?: "", size = 18)
                 }
                 Spacer(Modifier.height(16.dp))
-                Card(Modifier.fillMaxWidth().weight(1f)) {
-                    Body("코스", Ink, 19)
-                    Spacer(Modifier.height(6.dp))
-                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                Card(Modifier.fillMaxWidth().weight(1f), 14) {
+                  Row(Modifier.fillMaxSize()) {
+                    CourseMap(trip.origin, trip.plan, trip.passengers,
+                        Modifier.weight(1.45f).fillMaxHeight().clip(RoundedCornerShape(16.dp)))
+                    Spacer(Modifier.width(18.dp))
+                    Column(Modifier.weight(1f).padding(top = 8.dp).verticalScroll(rememberScrollState())) {
+                        Body("코스", Ink, 19)
+                        Spacer(Modifier.height(6.dp))
                         for (st in trip.plan) {
                             val color = if (st.done) Sub else when (st.kind) { "pickup" -> Green; "dropoff" -> Blue; else -> Ink }
                             val label = when (st.kind) { "pickup" -> "${st.name} 태우기"; "dropoff" -> "${st.name} 내리기"; else -> "도착" }
                             Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(if (st.done) "✓" else "●", color = color, fontSize = 20.sp, modifier = Modifier.width(32.dp))
-                                Text("$label · ${st.place.label}", fontSize = 19.sp, color = if (st.done) Sub else Ink)
+                                Column {
+                                    Text(label, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = if (st.done) Sub else Ink)
+                                    Text(st.place.label, fontSize = 15.sp, color = Sub)
+                                }
                             }
                         }
                     }
+                  }
                 }
             }
             Column(Modifier.weight(0.8f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -806,8 +828,10 @@ private fun DrivingScreen(onArrive: () -> Unit) {
                 }
                 Spacer(Modifier.width(18.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("${card.name}님 ${if (card.boarding) "탑승" else "하차"}를 기록했어요", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
-                    Body("%.1fkm 지점".format(trip.drivenKm), size = 16)
+                    Text("${card.name}님 ${if (card.boarding) "탑승을" else "하차를"} 기록했어요", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
+                    val at = trip.passengers.firstOrNull { it.id == card.passengerId }
+                        ?.let { if (card.boarding) it.boardPlace else it.alightPlace }?.label ?: ""
+                    Body(if (trip.drivenKm > 0.05) "$at · %.1fkm 지점".format(trip.drivenKm) else at, size = 16)
                 }
                 MiniBtn("잘못 인식") { TripEngine.undoCard() }
             }
@@ -842,7 +866,8 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
     var newFolder by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         val a = TripEngine.computeSettlement()
-        if (a != null) TripEngine.postSettlement()
+        // keep trying until the passengers' pages have it (a dropped connection must not leave it unposted)
+        while (a != null && !TripEngine.postSettlement()) delay(4000)
         runCatching { folders = rpc.call("get_trip_admin", args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret)).optJSONArray("folders") ?: JSONArray() }
     }
     val a = trip.allocation
@@ -859,7 +884,11 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                     Text(NumberFormat.getInstance().format(a.total), fontSize = 64.sp, fontWeight = FontWeight.Bold, color = Ink)
                     Text(" 원", fontSize = 28.sp, color = Sub, modifier = Modifier.padding(bottom = 10.dp))
                 }
-                Body(if (a.method == "shapley") "함께 타서 아낀 돈을 각자 만든 거리만큼 나눴어요" else "통신이 안 돼 구간별로 탄 사람끼리 나눴어요", size = 18)
+                Body(when (a.method) {
+                    "shapley" -> "함께 타서 아낀 돈을 각자 만든 거리만큼 나눴어요"
+                    "equal" -> "동승자끼리 똑같이 나눴어요"
+                    else -> "길찾기가 안 돼 구간별로 탄 사람끼리 나눴어요"
+                }, size = 18)
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Stat("기름값", won(a.fuelAmount), Modifier.weight(1f))
@@ -867,11 +896,18 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Stat("총 거리", "%.1fkm".format(trip.drivenKm), Modifier.weight(1f))
+                    Stat("총 거리", "%.1fkm".format(trip.settlementKm), Modifier.weight(1f))
                     Stat("연비", "%.1fkm/L".format(trip.efficiencyKmL ?: 12.0), Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
                 Body(if (trip.settlementPosted) "동승자 페이지에 정산을 올렸어요" else "정산을 올리는 중이에요", if (trip.settlementPosted) Green else Sub, 17)
+                Spacer(Modifier.height(12.dp))
+                // only the people who actually rode, in colour
+                val rode = trip.passengers.filter { it.boarded }
+                CourseMap(trip.origin,
+                    trip.plan.filter { st -> st.passengerId == null || rode.any { it.id == st.passengerId } }.map { it.copy(done = false) },
+                    rode,
+                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
             }
             Column(Modifier.weight(1.1f).fillMaxHeight()) {
                 Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -883,9 +919,14 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                                 Spacer(Modifier.width(16.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(s.rider.name, fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                                    val route = "${p?.boardPlace?.label ?: ""} → ${p?.alightPlace?.area?.ifEmpty { p.alightPlace.label } ?: ""}"
                                     Body(
-                                        if (s.rider.isDriver) "운전자 · 몫 %.1fkm".format(s.shareKm)
-                                        else "${p?.boardPlace?.label ?: ""} → ${p?.alightPlace?.area?.ifEmpty { p.alightPlace.label } ?: ""} · 몫 %.1fkm · 혼자면 ${won(s.alone)}".format(s.shareKm),
+                                        when {
+                                            a.method == "equal" && s.rider.isDriver -> "운전자 · 내지 않아요"
+                                            a.method == "equal" -> "$route · N분의 1"
+                                            s.rider.isDriver -> "운전자 · 몫 %.1fkm".format(s.shareKm)
+                                            else -> "$route · 몫 %.1fkm · 혼자면 ${won(s.alone)}".format(s.shareKm)
+                                        },
                                         size = 15
                                     )
                                 }
@@ -902,7 +943,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                         val f = folders.getJSONObject(i)
                         Chip(f.optString("name"), chosen == f.optString("code"), sub = "${f.optInt("trips")}회 쌓임") { chosen = f.optString("code") }
                     }
-                    Chip("+ 새 카풀 폴더", chosen == "new", sub = "동아리 MT") { chosen = "new"; newFolder = trip.title }
+                    Chip("+ 새 카풀 폴더", chosen == "new", sub = trip.title) { chosen = "new"; newFolder = trip.title }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Btn("즐겨찾기 추가", Modifier.weight(1f), primary = false) {
@@ -917,7 +958,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                                 .onSuccess { onMessage("운전자 휴대폰에 정산 카드를 보냈어요") }.onFailure { onMessage("보내지 못했어요: ${it.message}") }
                         }
                     }
-                    Btn("확정하고 완료", Modifier.weight(1f), enabled = chosen != null) {
+                    Btn("확정하고 완료", Modifier.weight(1f), enabled = chosen != null && trip.settlementPosted) {
                         scope.launch {
                             val c = chosen ?: return@launch
                             val a2 = when (c) {
