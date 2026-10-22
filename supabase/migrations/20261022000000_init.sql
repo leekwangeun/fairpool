@@ -576,8 +576,9 @@ end $$;
 
 -- ---------------------------------------------------------------- trips
 
--- Called from the driver web page (driver secret) or the car (vehicle secret); both may be null
--- for an instant trip started from the car screen before any driver is linked.
+-- Trips are made on the car screen only (L1, parked), with the car's secret. The trip belongs to the
+-- driver linked to the car, or to the car's own account before any driver links it. The driver's
+-- phone only views and passes on what the car sends.
 create or replace function public.create_trip(
   p_title text,
   p_origin jsonb default null,
@@ -585,23 +586,20 @@ create or replace function public.create_trip(
   p_include_driver boolean default true,
   p_seats int default 4,
   p_rule text default 'shapley',
-  p_driver_secret text default null,
   p_vehicle_secret text default null
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
-  d public.drivers := public._driver(p_driver_secret);
   v public.vehicles := public._vehicle(p_vehicle_secret);
   s text := public._secret();
   t public.trips;
 begin
-  if p_driver_secret is not null and d.id is null then raise exception 'not_allowed'; end if;
-  if p_vehicle_secret is not null and v.id is null then raise exception 'not_allowed'; end if;
+  if v.id is null then raise exception 'not_allowed'; end if;
   -- the fair split is computed for every group of riders in the car: up to 4 passengers and the driver
   if coalesce(p_seats, 4) not between 1 and 4 then raise exception 'bad_seats'; end if;
   insert into public.trips (code, admin_hash, driver_id, vehicle_id, title, origin, destination,
                             include_driver, seats, rule)
-  values (public._new_trip_code(), public._hash(s), coalesce(d.id, public._car_driver(v.id)), v.id,
+  values (public._new_trip_code(), public._hash(s), public._car_driver(v.id), v.id,
           coalesce(nullif(trim(p_title), ''), '함께 가는 길'), p_origin, p_destination,
           coalesce(p_include_driver, true), coalesce(p_seats, 4), coalesce(p_rule, 'shapley'))
   returning * into t;
@@ -1725,23 +1723,21 @@ begin
   return jsonb_build_object('carpool_code', c.code);
 end $$;
 
--- "Make the last trip again": a new trip with the same members, and the places of those who
--- agreed to keep them already filled in.
-create or replace function public.recreate_trip(p_carpool_code text, p_driver_secret text default null,
-                                                p_vehicle_secret text default null) returns jsonb
+-- "불러와서 준비하기" on the car (L1-3): a new trip with the same members, and the places kept for them
+-- already filled in. Only a car linked to the favourite's driver; never from the driver's phone.
+create or replace function public.recreate_trip(p_carpool_code text, p_vehicle_secret text default null)
+returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   c public.carpools;
-  d public.drivers := public._driver(p_driver_secret);
   v public.vehicles := public._vehicle(p_vehicle_secret);
   s text := public._secret();
   t public.trips;
 begin
+  if v.id is null then raise exception 'not_allowed'; end if;
   select * into c from public.carpools where code = upper(p_carpool_code) and archived_at is null;
   if c.id is null then raise exception 'carpool_not_found'; end if;
-  if not (coalesce(d.id = c.driver_id, false) or coalesce(v.driver_id = c.driver_id, false)) then
-    raise exception 'not_allowed';
-  end if;
+  if v.driver_id is distinct from c.driver_id then raise exception 'not_allowed'; end if;
   insert into public.trips (code, admin_hash, driver_id, vehicle_id, carpool_id, title, origin, destination,
                             include_driver, seats, rule)
   values (public._new_trip_code(), public._hash(s), c.driver_id, v.id, c.id, c.title, c.origin, c.destination,

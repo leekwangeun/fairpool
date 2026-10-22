@@ -62,13 +62,13 @@ async function ride(db, secrets, riders, shares, title = '출근') {
 
 test('settled and cancelled trips are final, and a started trip does not go back to preparing', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
-  const going = await rpc(db, 'create_trip', { p_title: '퇴근', p_driver_secret: driver_secret });
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
+  const going = await rpc(db, 'create_trip', { p_title: '퇴근', p_vehicle_secret: vehicle_secret });
   const set = (t, s) => rpc(db, 'set_trip_status', { p_code: t.code, p_admin_secret: t.admin_secret, p_status: s });
   await set(going, 'in_progress');
   await assert.rejects(set(going, 'preparing'), /bad_status/);
 
-  const done = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진']], { 수진: 2000 });
+  const done = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진']], { 수진: 2000 });
   assert.equal((await admin(db, done)).status, 'settled');
   await assert.rejects(set(done, 'cancelled'), /trip_closed/, 'a settled trip cannot be cancelled afterwards');
   await assert.rejects(set(done, 'in_progress'), /trip_closed/);
@@ -84,14 +84,14 @@ test('settled and cancelled trips are final, and a started trip does not go back
 test('what someone already paid cannot be switched to a folder or cancelled away', async () => {
   const db = await freshDb();
   const { driver_secret, vehicle_secret } = await driverWithCar(db);
-  const a = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진'], [2, '민호']], { 수진: 2430, 민호: 1780 });
+  const a = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진'], [2, '민호']], { 수진: 2430, 민호: 1780 });
   await rpc(db, 'choose_settlement', { p_code: a.code, p_admin_secret: a.admin_secret, p_mode: 'direct' });
   await rpc(db, 'mark_paid', { p_code: a.code, p_admin_secret: a.admin_secret, p_passenger_id: a.ids['수진'] });
   await assert.rejects(rpc(db, 'choose_settlement', { p_code: a.code, p_admin_secret: a.admin_secret, p_mode: 'folder',
                                                       p_new_folder: '출근 카풀' }), /settle_started/);
   assert.notEqual((await admin(db, a)).passengers.find((p) => p.name === '수진').paid_at, null, 'the tick is still there');
 
-  const b = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진'], [2, '민호']], { 수진: 2430, 민호: 1780 });
+  const b = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진'], [2, '민호']], { 수진: 2430, 민호: 1780 });
   const folder = (await rpc(db, 'choose_settlement', { p_code: b.code, p_admin_secret: b.admin_secret, p_mode: 'folder',
                                                        p_new_folder: '출근 카풀' })).folder.code;
   const req = (await rpc(db, 'request_batch', { p_folder_code: folder, p_secret: vehicle_secret })).requested;
@@ -110,9 +110,9 @@ test('what someone already paid cannot be switched to a folder or cancelled away
 
 test('the car cannot bill passengers of another trip', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
-  const a = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진']], { 수진: 2000 });
-  const b = await rpc(db, 'create_trip', { p_title: '퇴근', p_driver_secret: driver_secret });
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
+  const a = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진']], { 수진: 2000 });
+  const b = await rpc(db, 'create_trip', { p_title: '퇴근', p_vehicle_secret: vehicle_secret });
   await assert.rejects(rpc(db, 'post_settlement', {
     p_code: b.code, p_admin_secret: b.admin_secret,
     p_payload: { total: 2000, shares: [{ passenger_id: a.ids['수진'], name: '수진', amount: 2000 }] } }), /bad_share/);
@@ -120,9 +120,9 @@ test('the car cannot bill passengers of another trip', async () => {
 
 test('only riders see the settlement, others\' stops are left out, and the account needs a share', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
   // 지수 joined but did not come, so the car bills only 수진 and 민호
-  const t = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진'], [2, '민호'], [3, '지수']],
+  const t = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진'], [2, '민호'], [3, '지수']],
                        { 수진: 2430, 민호: 1780 });
   await rpc(db, 'choose_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_mode: 'direct' });
 
@@ -149,7 +149,7 @@ test('only riders see the settlement, others\' stops are left out, and the accou
 test('a car manages only the trips and folders of the driver it is linked to now', async () => {
   const db = await freshDb();
   const { driver_secret, vehicle_secret } = await driverWithCar(db);
-  const a = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진']], { 수진: 2000 });
+  const a = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진']], { 수진: 2000 });
   await rpc(db, 'choose_settlement', { p_code: a.code, p_admin_secret: a.admin_secret, p_mode: 'folder',
                                        p_new_folder: '출근 카풀' });
   assert.equal((await rpc(db, 'get_trip_admin', { p_code: a.code, p_admin_secret: vehicle_secret })).code, a.code);
@@ -188,8 +188,8 @@ test('trips and folders made on a car before linking follow the driver who links
 
 test('a misrecognised boarding is undone, and a dropped-off ride is no longer edited from the phone', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
-  const t = await rpc(db, 'create_trip', { p_title: '출근', p_driver_secret: driver_secret });
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
+  const t = await rpc(db, 'create_trip', { p_title: '출근', p_vehicle_secret: vehicle_secret });
   const join = (pickup, dropoff) => rpc(db, 'join_trip', { p_code: t.code, p_device_key: device(1), p_name: '수진',
                                                            p_pickup: place(pickup), p_dropoff: place(dropoff) });
   await join('집 앞', '회사');
@@ -220,7 +220,7 @@ test('a misrecognised boarding is undone, and a dropped-off ride is no longer ed
 test('deleting a ride record also takes the name off the folder line and the kept stops', async () => {
   const db = await freshDb();
   const { driver_secret, vehicle_secret } = await driverWithCar(db);
-  const t = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진'], [2, '민호']], { 수진: 2430, 민호: 1780 });
+  const t = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진'], [2, '민호']], { 수진: 2430, 민호: 1780 });
   const folder = (await rpc(db, 'choose_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_mode: 'folder',
                                                        p_new_folder: '출근 카풀' })).folder.code;
   const req = (await rpc(db, 'request_batch', { p_folder_code: folder, p_secret: vehicle_secret })).requested;
@@ -238,7 +238,7 @@ test('deleting a ride record also takes the name off the folder line and the kep
 test('removing a favourite clears its kept places; a folder is removed only when nothing is being settled', async () => {
   const db = await freshDb();
   const { driver_secret, vehicle_secret } = await driverWithCar(db);
-  const t = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진']], { 수진: 2000 });
+  const t = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진']], { 수진: 2000 });
   const { carpool_code } = await rpc(db, 'save_carpool', { p_code: t.code, p_admin_secret: t.admin_secret,
                                                           p_driver_secret: driver_secret });
   await assert.rejects(rpc(db, 'archive_carpool', { p_carpool_code: carpool_code, p_secret: 'someone-else' }),
@@ -261,9 +261,9 @@ test('removing a favourite clears its kept places; a folder is removed only when
 
 test('trips left running are closed after 7 days and stop sharing the car position after a day', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
-  const old = await rpc(db, 'create_trip', { p_title: '출근', p_driver_secret: driver_secret });
-  const day = await rpc(db, 'create_trip', { p_title: '퇴근', p_driver_secret: driver_secret });
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
+  const old = await rpc(db, 'create_trip', { p_title: '출근', p_vehicle_secret: vehicle_secret });
+  const day = await rpc(db, 'create_trip', { p_title: '퇴근', p_vehicle_secret: vehicle_secret });
   for (const t of [old, day]) {
     await rpc(db, 'set_trip_status', { p_code: t.code, p_admin_secret: t.admin_secret, p_status: 'in_progress' });
     await rpc(db, 'update_progress', { p_code: t.code, p_admin_secret: t.admin_secret,
@@ -280,8 +280,8 @@ test('trips left running are closed after 7 days and stop sharing the car positi
 
 test('a page takes at most 100 wrong tries a day, even spread over hours', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
-  const t = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진']], { 수진: 2000 });
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
+  const t = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진']], { 수진: 2000 });
   const id = (await db.query('select id from public.trips where code = $1', [t.code])).rows[0].id;
   await db.query(`insert into public.verify_attempts (scope, device_key_hash, failed_at)
                   select 'trip:' || $1, 'd' || g, now() - (g % 20 + 2) * interval '1 hour' from generate_series(1, 100) g`,
@@ -292,11 +292,11 @@ test('a page takes at most 100 wrong tries a day, even spread over hours', async
 
 test('the favourite link adds up the month for the same rider on a new phone', async () => {
   const db = await freshDb();
-  const { driver_secret } = await driverWithCar(db);
-  const a = await ride(db, { p_driver_secret: driver_secret }, [[1, '수진']], { 수진: 2000 });
+  const { driver_secret, vehicle_secret } = await driverWithCar(db);
+  const a = await ride(db, { p_vehicle_secret: vehicle_secret }, [[1, '수진']], { 수진: 2000 });
   const { carpool_code } = await rpc(db, 'save_carpool', { p_code: a.code, p_admin_secret: a.admin_secret,
                                                           p_driver_secret: driver_secret });
-  const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
+  const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_vehicle_secret: vehicle_secret });
   await rpc(db, 'verify_device', { p_code: next.code, p_device_key: device(7), p_name: '수진', p_phone4: '1111' });
   const id = (await admin(db, next)).passengers[0].id;
   await rpc(db, 'post_settlement', { p_code: next.code, p_admin_secret: next.admin_secret,

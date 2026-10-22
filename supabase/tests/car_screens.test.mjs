@@ -246,7 +246,7 @@ test('L1-3: a favourite shows its places on the car, and the driver\'s own place
                                                   p_origin: place('불광동') });
   assert.equal(fixed.origin.label, '불광동');
   assert.equal(fixed.destination.label, '가평 MT 숙소', 'what is not sent stays');
-  const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
+  const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_vehicle_secret: vehicle_secret });
   assert.equal((await admin(db, next)).origin.label, '불광동', 'the next trip starts from the fixed place');
 });
 
