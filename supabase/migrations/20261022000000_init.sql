@@ -787,18 +787,21 @@ begin
     'passengers', public._passengers_admin(t.id),
     'progress', t.progress,
     'driver_stops', coalesce(t.driver_stops, '[]'::jsonb),
-    -- every place the car has to pass, for NaviHelper waypoints; the car decides the order (L3)
-    'waypoints', (select coalesce(jsonb_agg(w), '[]'::jsonb) from (
-                    select jsonb_build_object('kind', 'pickup', 'passenger_id', p.id, 'name', p.name) || p.pickup as w
+    -- every place the car has to pass, for NaviHelper waypoints. The car decides the route (L3); the list
+    -- comes in a fixed order: pickups, then drop-offs (each in joining order), then the driver's stops
+    'waypoints', (select coalesce(jsonb_agg(w order by g, k), '[]'::jsonb) from (
+                    select jsonb_build_object('kind', 'pickup', 'passenger_id', p.id, 'name', p.name) || p.pickup as w,
+                           1 as g, extract(epoch from p.joined_at) as k
                     from public.trip_passengers p
                     where p.trip_id = t.id and p.pickup is not null and p.record_deleted_at is null
                     union all
-                    select jsonb_build_object('kind', 'dropoff', 'passenger_id', p.id, 'name', p.name) || p.dropoff
+                    select jsonb_build_object('kind', 'dropoff', 'passenger_id', p.id, 'name', p.name) || p.dropoff,
+                           2, extract(epoch from p.joined_at)
                     from public.trip_passengers p
                     where p.trip_id = t.id and p.dropoff is not null and p.record_deleted_at is null
                     union all
-                    select jsonb_build_object('kind', 'driver_stop', 'stop_id', x ->> 'id') || (x - 'id')
-                    from jsonb_array_elements(coalesce(t.driver_stops, '[]'::jsonb)) x) z),
+                    select jsonb_build_object('kind', 'driver_stop', 'stop_id', x ->> 'id') || (x - 'id'), 3, n
+                    from jsonb_array_elements(coalesce(t.driver_stops, '[]'::jsonb)) with ordinality as y(x, n)) z),
     'settlement', (select payload from public.settlements where trip_id = t.id),
     'settle_mode', t.settle_mode,
     'folder', (select jsonb_build_object('code', f.code, 'name', f.name, 'status', b.status)

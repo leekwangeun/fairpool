@@ -10,17 +10,18 @@ import { pathToFileURL } from 'node:url';
 import { callRpc, defaultDataDir, openDb } from './db.mjs';
 
 const place = (label, area, lat, lng) => ({ label, area, lat, lng });
+// The MT trip uses the points the plan's distance table was measured with (OSRM, plan 3.4 example 1).
 const P = {
-  home: place('응암동 지훈 집', '은평구 응암동', 37.5986, 126.9155),
+  home: place('응암동 지훈 집', '은평구 응암동', 37.59870, 126.91757),
   office: place('광화문 회사', '종로구 세종로', 37.5714, 126.9768),
   sujin: place('불광역 버스정류장', '은평구 불광동', 37.6105, 126.9297),
   minho: place('역촌역', '은평구 역촌동', 37.6060, 126.9226),
   jieun: place('녹번역', '은평구 녹번동', 37.6008, 126.9358),
-  mt: place('가평 MT 숙소', '가평군 가평읍', 37.8315, 127.5096),
-  sinchon: place('신촌역 2번 출구', '서대문구 창천동', 37.5552, 126.9369),
-  mangwon: place('망원역', '마포구 망원동', 37.5560, 126.9101),
-  yeonnam: place('연남동 공원', '마포구 연남동', 37.5660, 126.9250),
-  yeonhui: place('연희동 주민센터', '서대문구 연희동', 37.5682, 126.9312),
+  mt: place('가평 MT 숙소', '가평군 가평읍', 37.81518, 127.51020),
+  sinchon: place('신촌역 2번 출구', '서대문구 창천동', 37.55534, 126.93662),
+  mangwon: place('망원역', '마포구 망원동', 37.55591, 126.91025),
+  yeonnam: place('연남동 공원', '마포구 연남동', 37.56245, 126.92339),
+  yeonhui: place('연희동 주민센터', '서대문구 연희동', 37.56679, 126.93121),
 };
 
 // device keys and last 4 digits of the demo passengers; a browser opens their pages with the key in

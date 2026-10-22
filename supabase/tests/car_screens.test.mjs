@@ -278,7 +278,9 @@ test('L3: the driver\'s own stops join the waypoints, and passengers see them on
   let a = await set([{ label: '거래처', address: '서울 중구', lat: 37.56, lng: 126.98 }, place('세탁소')]);
   assert.deepEqual(a.driver_stops.map((x) => x.label), ['거래처', '세탁소']);
   assert.ok(a.driver_stops.every((x) => x.id));
-  assert.deepEqual(a.waypoints.map((w) => w.kind).sort(), ['driver_stop', 'driver_stop', 'dropoff', 'pickup']);
+  // a fixed order: pickups, drop-offs, then the driver's stops in their order
+  assert.deepEqual(a.waypoints.map((w) => w.kind), ['pickup', 'dropoff', 'driver_stop', 'driver_stop']);
+  assert.deepEqual(a.waypoints.filter((w) => w.kind === 'driver_stop').map((w) => w.label), ['거래처', '세탁소']);
   assert.equal(a.waypoints.find((w) => w.kind === 'pickup').label, '신촌역');
   assert.ok(a.waypoints.filter((w) => w.kind === 'driver_stop').every((w) => w.lat && w.stop_id));
 
