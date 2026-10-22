@@ -192,10 +192,19 @@ export default function DriverTrip() {
               </button>
             </Card>
           ) : (
-            store.driverSecret() && (
-              <Button variant="secondary" onClick={() => run(() => rpc('save_carpool', { p_code: code, p_admin_secret: secret, p_driver_secret: store.driverSecret() }))}>
-                즐겨찾기에 추가
-              </Button>
+            // like the arrival screen (L6/P6): offered once the trip is settled, keeping who actually rode
+            trip.status === 'settled' && (
+              <Card className="gap-2">
+                <p className="t-caption text-sub">
+                  실제로 탄 사람과 장소, 나누는 방법이 그대로 저장돼요. 다음부터는 즐겨찾기를 누르면 같은 운행이 만들어져요.
+                </p>
+                <Button
+                  variant="secondary"
+                  onClick={() => run(() => rpc('save_carpool', { p_code: code, p_admin_secret: secret, p_driver_secret: store.driverSecret() }))}
+                >
+                  즐겨찾기에 추가
+                </Button>
+              </Card>
             )
           )}
           {demoMode && trip.status !== 'settled' && <DemoTools trip={trip} secret={secret} run={run} />}

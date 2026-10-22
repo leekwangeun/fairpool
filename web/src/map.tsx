@@ -12,6 +12,20 @@ export function hasPoint(p: { lat?: number | null; lng?: number | null } | null 
   return !!p && typeof p.lat === 'number' && typeof p.lng === 'number';
 }
 
+// Demo routing from the public OSRM server; the real app uses the NaviHelper or Kakao Mobility route.
+// Falls back to straight segments when the request fails.
+async function roadPath(stops: LatLng[]): Promise<[number, number][]> {
+  const straight = stops.map((s): [number, number] => [s.lng, s.lat]);
+  try {
+    const coords = straight.map(([lng, lat]) => `${lng},${lat}`).join(';');
+    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`);
+    const body = await res.json();
+    return body.routes?.[0]?.geometry?.coordinates ?? straight;
+  } catch {
+    return straight;
+  }
+}
+
 export function CourseMap({
   height,
   pickup,
@@ -57,6 +71,22 @@ export function CourseMap({
         const bounds = new maplibregl.LngLatBounds();
         points.forEach((pt) => bounds.extend([pt.lng, pt.lat]));
         map.fitBounds(bounds, { padding: { top: 52, bottom: 32, left: 32, right: 32 }, maxZoom: 15, duration: 0 });
+      }
+      // road path in driving order: car → pickup → drop-off
+      const stops = [c, p, d].filter(hasPoint);
+      if (stops.length > 1) {
+        map.on('load', async () => {
+          const line = await roadPath(stops);
+          if (disposed || !map) return;
+          map.addSource('route', { type: 'geojson', data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } } });
+          map.addLayer({
+            id: 'route',
+            type: 'line',
+            source: 'route',
+            layout: { 'line-join': 'round', 'line-cap': 'round' },
+            paint: { 'line-color': '#2f6bff', 'line-width': 4 },
+          });
+        });
       }
     });
     return () => {

@@ -135,8 +135,6 @@ test('carpool folder stacks trips and settles them together', async () => {
   const first = await rpc(db, 'create_trip', { p_title: '출근', p_driver_secret: driver_secret });
   await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진', p_phone4: '1111' });
   await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤', p_phone4: '2222' });
-  const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
-                                                          p_driver_secret: driver_secret });
   const page = (code, n) => rpc(db, 'get_settle_page', { p_code: code, p_device_key: device(n) });
   const settle = async (trip, sujin, doyoon) => {
     const ps = (await rpc(db, 'get_trip_admin', { p_code: trip.code, p_admin_secret: trip.admin_secret })).passengers;
@@ -150,6 +148,9 @@ test('carpool folder stacks trips and settles them together', async () => {
   const view = (trip, n) => rpc(db, 'get_trip', { p_code: trip.code, p_device_key: device(n) });
 
   await settle(first, 2430, 2430);
+  // 즐겨찾기에 추가 on the arrival screen
+  const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                          p_driver_secret: driver_secret });
   await assert.rejects(rpc(db, 'choose_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
                                                       p_mode: 'folder' }), /folder_required/);
   let admin = await rpc(db, 'choose_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
@@ -257,23 +258,32 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   const first = await rpc(db, 'create_trip', { p_title: '출근 카풀', p_destination: place('회사'),
                                               p_driver_secret: driver_secret });
   // no consent step: places of a saved carpool are kept by default and can be removed later
-  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진', p_pickup: place('버스정류장') });
+  const busStop = { label: '버스정류장', lat: 37.561234, lng: 126.973456 };
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진', p_pickup: busStop });
   await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤', p_pickup: place('도윤 집') });
-  const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
-                                                          p_driver_secret: driver_secret });
-  assert.match(carpool_code, /^[2-9A-HJ-NP-Z]{8}$/);
+  await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(3), p_name: '안 온 사람', p_pickup: place('정문') });
+  // a favourite is added on the arrival screen, after the trip
+  await assert.rejects(rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                 p_driver_secret: driver_secret }), /not_settled/);
   const shareFor = async (code, secret) => {
     const ps = (await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: secret })).passengers;
-    const sujin = ps.find((p) => p.name === '수진');
-    return { total: 6000, shares: [{ passenger_id: sujin.id, name: '수진', km: 20, amount: 2430 }] };
+    const id = (n) => ps.find((p) => p.name === n).id;
+    return { total: 6000, shares: [{ passenger_id: id('수진'), name: '수진', km: 20, amount: 2430 },
+                                   { passenger_id: id('도윤'), name: '도윤', km: 15, amount: 1800 }] };
   };
   await rpc(db, 'post_settlement', { p_code: first.code, p_admin_secret: first.admin_secret,
                                      p_payload: await shareFor(first.code, first.admin_secret) });
+  const { carpool_code } = await rpc(db, 'save_carpool', { p_code: first.code, p_admin_secret: first.admin_secret,
+                                                          p_driver_secret: driver_secret });
+  assert.match(carpool_code, /^[2-9A-HJ-NP-Z]{8}$/);
 
   const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
   assert.notEqual(next.code, first.code);
   const again = await rpc(db, 'get_trip', { p_code: next.code, p_device_key: device(1) });
   assert.equal(again.me.pickup.label, '버스정류장', 'members keep the same stop');
+  assert.equal(again.me.pickup.lat, 37.561234, 'with the exact point, not the rounded record');
+  assert.equal(again.passengers.length, 2, 'only the people who actually rode are kept');
+  assert.equal((await rpc(db, 'get_trip', { p_code: next.code, p_device_key: device(3) })).me, null);
   const other = await rpc(db, 'get_trip', { p_code: next.code, p_device_key: device(2) });
   assert.equal(other.me.pickup.label, '도윤 집');
   await rpc(db, 'post_settlement', { p_code: next.code, p_admin_secret: next.admin_secret,
@@ -421,6 +431,17 @@ test('a trip made on the car screen hands the passengers\' stops back to the car
   // the same secret the car holds from create_trip also works
   const again = await rpc(db, 'get_trip_admin', { p_code: trip.code, p_admin_secret: trip.admin_secret });
   assert.equal(again.passengers.length, 1);
+
+  // a trip started on the spot from the car QR can be added to favourites on the arrival screen too
+  const taeho = again.passengers[0].id;
+  await rpc(db, 'post_settlement', { p_code: trip.code, p_admin_secret: car.vehicle_secret,
+                                     p_payload: { total: 3000, shares: [{ passenger_id: taeho, name: '태호', amount: 1500 }] } });
+  const { carpool_code } = await rpc(db, 'save_carpool', { p_code: trip.code, p_admin_secret: car.vehicle_secret });
+  const loaded = await rpc(db, 'get_vehicle_trips', { p_vehicle_secret: car.vehicle_secret });
+  assert.equal(loaded.carpools[0].code, carpool_code);
+  const next = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_vehicle_secret: car.vehicle_secret });
+  const member = (await rpc(db, 'get_trip_admin', { p_code: next.code, p_admin_secret: next.admin_secret })).passengers[0];
+  assert.equal(member.pickup.lat, 37.5552, 'the favourite keeps the exact waypoint');
 });
 
 test('a full car refuses new passengers, and only the driver takes someone off before boarding', async () => {

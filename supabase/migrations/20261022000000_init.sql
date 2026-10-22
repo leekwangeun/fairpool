@@ -182,6 +182,7 @@ create table public.trip_passengers (
   paid_at         timestamptz,           -- 바로 정산: the driver confirmed this passenger paid
   place_removed_at  timestamptz,         -- the driver removed this passenger's place before boarding
   record_deleted_at timestamptz,         -- the driver deleted this ride record after settlement
+  exact_stops       jsonb,               -- exact stops kept for a day so the arrival screen can add a favourite
   unique (trip_id, device_key_hash)
 );
 
@@ -245,6 +246,21 @@ language sql stable set search_path = public, extensions as $$
   select * from public.vehicles
   where p_secret is not null and secret_hash = public._hash(p_secret) and revoked_at is null
 $$;
+
+-- The driver a car acts for; a car not linked yet gets a car-only driver of its own, which moves to the
+-- driver who links the car later (claim_vehicle_link).
+create or replace function public._car_driver(p_vehicle uuid) returns uuid
+language plpgsql volatile set search_path = public, extensions as $$
+declare did uuid;
+begin
+  if p_vehicle is null then return null; end if;
+  select driver_id into did from public.vehicles where id = p_vehicle;
+  if did is null then
+    insert into public.drivers (secret_hash, car_only) values (public._hash(public._secret()), true) returning id into did;
+    update public.vehicles set driver_id = did where id = p_vehicle;
+  end if;
+  return did;
+end $$;
 
 -- The trip creator's secret, or the secret of a car linked to the trip's driver, may manage a trip.
 create or replace function public._trip_admin(p_code text, p_secret text) returns public.trips
@@ -431,10 +447,7 @@ begin
      or nullif(trim(p_account_holder), '') is null then
     raise exception 'bank_incomplete';
   end if;
-  if did is null then
-    insert into public.drivers (secret_hash, car_only) values (public._hash(public._secret()), true) returning id into did;
-    update public.vehicles set driver_id = did where id = v.id;
-  end if;
+  did := public._car_driver(v.id);
   update public.drivers set
     bank_name = trim(p_bank_name), bank_account = public._enc(trim(p_bank_account)),
     account_holder = public._enc(trim(p_account_holder)), bank_consent_at = coalesce(bank_consent_at, now())
@@ -795,6 +808,10 @@ begin
   from public.trip_passengers p
   where t.carpool_id is not null and m.carpool_id = t.carpool_id and p.trip_id = t.id
     and p.save_place and m.device_key_hash = p.device_key_hash;
+  -- the arrival screen may still add this trip to favourites, so exact stops stay for a day
+  update public.trip_passengers set exact_stops = jsonb_strip_nulls(jsonb_build_object('pickup', pickup, 'dropoff', dropoff))
+  where trip_id = t.id and t.carpool_id is null and save_place and exact_stops is null
+    and (pickup is not null or dropoff is not null);
   -- precise positions are no longer needed: keep them only at neighbourhood level (about 1 km)
   update public.trip_passengers set
     pickup = case when pickup ? 'lat' then pickup || jsonb_build_object(
@@ -1186,31 +1203,48 @@ end $$;
 
 -- ---------------------------------------------------------------- regular carpools
 
-create or replace function public.save_carpool(p_code text, p_admin_secret text, p_driver_secret text) returns jsonb
+-- 즐겨찾기에 추가, chosen on the arrival screen (L6/P6) once the trip is settled: the people who actually
+-- rode (a share in the settlement), their stops and the rule are kept. Trips started on the spot from the
+-- car QR can be added too; the car's driver owns the favourite. A trip loaded from a favourite is not
+-- asked again. A folder already chosen for this trip becomes the favourite's folder.
+create or replace function public.save_carpool(p_code text, p_admin_secret text, p_driver_secret text default null)
+returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips := public._trip_admin(p_code, p_admin_secret);
   d public.drivers := public._driver(p_driver_secret);
+  did uuid;
   c public.carpools;
   cc text;
 begin
-  if d.id is null then raise exception 'not_allowed'; end if;
+  if p_driver_secret is not null and d.id is null then raise exception 'not_allowed'; end if;
   if t.carpool_id is not null then
     select * into c from public.carpools where id = t.carpool_id;
     return jsonb_build_object('carpool_code', c.code);
   end if;
+  if t.status <> 'settled' then raise exception 'not_settled'; end if;
+  did := coalesce(d.id, t.driver_id, public._car_driver(t.vehicle_id));
+  if did is null then raise exception 'not_allowed'; end if;
   loop
     cc := public._code(8);
     exit when not exists (select 1 from public.carpools where code = cc);
   end loop;
-  insert into public.carpools (code, driver_id, title, origin, destination, include_driver, seats, rule)
-  values (cc, d.id, t.title, t.origin, t.destination, t.include_driver, t.seats, t.rule) returning * into c;
+  insert into public.carpools (code, driver_id, title, origin, destination, include_driver, seats, rule, folder_id)
+  values (cc, did, t.title, t.origin, t.destination, t.include_driver, t.seats, t.rule,
+          (select folder_id from public.folder_batches where id = t.batch_id))
+  returning * into c;
   insert into public.carpool_members (carpool_id, name, pickup, dropoff, device_key_hash, phone4_hash)
-  select c.id, name,
-         case when save_place then pickup end, case when save_place then dropoff end,
-         device_key_hash, phone4_hash
-  from public.trip_passengers where trip_id = t.id;
-  update public.trips set carpool_id = c.id, driver_id = coalesce(driver_id, d.id) where id = t.id;
+  select c.id, p.name,
+         case when p.save_place then p.exact_stops -> 'pickup' end,
+         case when p.save_place then p.exact_stops -> 'dropoff' end,
+         p.device_key_hash, p.phone4_hash
+  from public.trip_passengers p
+  where p.trip_id = t.id and p.record_deleted_at is null
+    and exists (select 1 from public.settlements st, jsonb_array_elements(st.payload -> 'shares') x
+                where st.trip_id = t.id and x ->> 'passenger_id' = p.id::text)
+  order by p.joined_at;
+  update public.trip_passengers set exact_stops = null where trip_id = t.id;
+  update public.trips set carpool_id = c.id, driver_id = coalesce(driver_id, did) where id = t.id;
   return jsonb_build_object('carpool_code', c.code);
 end $$;
 
@@ -1384,10 +1418,10 @@ create or replace function public.purge_old_locations() returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare n_loc int; n_old int;
 begin
-  update public.trip_passengers p set pickup = null, dropoff = null
+  update public.trip_passengers p set pickup = null, dropoff = null, exact_stops = null
   from public.trips t
   where p.trip_id = t.id and t.ended_at < now() - interval '24 hours'
-    and (p.pickup is not null or p.dropoff is not null);
+    and (p.pickup is not null or p.dropoff is not null or p.exact_stops is not null);
   get diagnostics n_loc = row_count;
   update public.trips set progress = null
   where ended_at < now() - interval '24 hours' and progress is not null;
