@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rpc, ruleName, type Place, type Rule } from '../api';
-import { store } from '../store';
+import { demoCarSecret, store } from '../store';
 import { Button, Card, CarStandIn, Checkbox, ErrorText, Field, OptionCard, Page, PlaceSearch, TextInput } from '../ui';
 
 // Every trip gets its own code, its own passenger page (/t/CODE) and its own QR.
-// On the car this happens on the L1/L2 screens; this page is the phone version for preparing ahead.
+// Demo mode only: stands in for the car's L1 screen and makes the trip with the stand-in car's secret.
 export default function NewTrip() {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
@@ -28,7 +28,7 @@ export default function NewTrip() {
         p_include_driver: includeDriver,
         p_seats: seats,
         p_rule: rule,
-        p_driver_secret: store.driverSecret(),
+        p_vehicle_secret: await demoCarSecret(),
       });
       store.setAdminSecret(r.code, r.admin_secret);
       navigate(`/d/${r.code}`, { replace: true });

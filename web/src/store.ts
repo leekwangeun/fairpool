@@ -1,9 +1,12 @@
+import { rpc } from './api';
+
 // Secrets live only on this device. The server keeps their hashes.
 const KEY = {
   driver: 'fairpool.driverSecret',
   device: 'fairpool.deviceKey',
   admin: 'fairpool.adminSecrets',
   name: 'fairpool.myName',
+  demoCar: 'fairpool.demoCar',
 };
 
 // Fallback when storage is blocked (private mode): keeps working for this visit only.
@@ -63,7 +66,22 @@ export const store = {
 
   myName: () => read(KEY.name) ?? '',
   setMyName: (n: string) => write(KEY.name, n),
+  // demo mode: a new driver on this phone gets a new stand-in car
+  forgetDemoCar: () => write(KEY.demoCar, null),
 };
+
+// Demo mode only: trips are made with a car's secret, so the pages standing in for the car screen use a
+// stand-in car linked to this driver.
+export async function demoCarSecret(): Promise<string> {
+  const saved = read(KEY.demoCar);
+  if (saved) return saved;
+  const car = await rpc<{ vehicle_secret: string; link_code: string }>('create_vehicle_link', {});
+  if (store.driverSecret()) {
+    await rpc('claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: store.driverSecret() });
+  }
+  write(KEY.demoCar, car.vehicle_secret);
+  return car.vehicle_secret;
+}
 
 export const baseUrl = (): string =>
   ((import.meta.env.VITE_PUBLIC_BASE_URL as string | undefined) || window.location.origin).replace(/\/$/, '');

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, demoMode, rpc, type Driver, type FolderItem } from '../api';
-import { store } from '../store';
+import { demoCarSecret, store } from '../store';
 import { BatchPill, Button, Card, CarStandIn, ErrorText, Field, Page, StatusPill, TextInput, won } from '../ui';
 
 // Trips are made and changed on the car screen only (parked). The driver's phone links the car and
@@ -92,6 +92,8 @@ function CarScreenStandIn() {
     try {
       const r = await rpc<{ driver_secret: string }>('create_driver', { p_display_name: name });
       store.setDriverSecret(r.driver_secret);
+      store.forgetDemoCar();
+      await demoCarSecret();
       setDriver(await rpc<Driver>('get_driver', { p_driver_secret: r.driver_secret }));
     } catch (e) {
       setError((e as Error).message);
@@ -103,7 +105,7 @@ function CarScreenStandIn() {
     try {
       const r = await rpc<{ code: string; admin_secret: string }>('recreate_trip', {
         p_carpool_code: carpoolCode,
-        p_driver_secret: store.driverSecret(),
+        p_vehicle_secret: await demoCarSecret(),
       });
       store.setAdminSecret(r.code, r.admin_secret);
       navigate(`/d/${r.code}`);

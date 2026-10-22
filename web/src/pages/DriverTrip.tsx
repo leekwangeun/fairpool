@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { demoMode, issueLabel, rpc, ruleName, type AdminTrip, type Settlement } from '../api';
-import { carpoolLink, store, tripLink } from '../store';
+import { carpoolLink, demoCarSecret, store, tripLink } from '../store';
 import {
   BatchPill,
   Button,
@@ -468,15 +468,14 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
     });
   }
 
-  // 운전자 정보 입력 is only on the car (L1-9): link a stand-in car to this driver and save a sample name,
-  // last 4 digits and account
+  // 운전자 정보 입력 is only on the car (L1-9): save a sample name, last 4 digits and account from the
+  // stand-in car
   async function addDriverInfoFromCar() {
-    const car = await rpc<{ vehicle_secret: string; link_code: string }>('create_vehicle_link', {});
-    await rpc('claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: store.driverSecret() });
+    const car = await demoCarSecret();
     const me = await rpc<{ display_name: string }>('get_driver', { p_driver_secret: store.driverSecret() });
-    await rpc('set_driver_info', { p_vehicle_secret: car.vehicle_secret, p_name: me.display_name, p_phone4: '1234' });
+    await rpc('set_driver_info', { p_vehicle_secret: car, p_name: me.display_name, p_phone4: '1234' });
     await rpc('set_bank_account', {
-      p_vehicle_secret: car.vehicle_secret,
+      p_vehicle_secret: car,
       p_consent: true,
       p_bank_name: '카카오뱅크',
       p_bank_account: '3333-01-2345678',
