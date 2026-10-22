@@ -60,8 +60,11 @@ export default function PassengerTrip() {
   if (notFound) {
     return (
       <Page>
-        <Card>
-          <p className="t-body">{notFound}</p>
+        <Card className="gap-1.5">
+          <h1 className="t-title">운행을 찾을 수 없어요</h1>
+          <p className="t-body text-sub">
+            주소가 잘못됐거나 오래돼 정리된 운행이에요. 운전자에게 새 링크나 차 화면의 QR을 받아 주세요
+          </p>
         </Card>
       </Page>
     );
@@ -71,9 +74,10 @@ export default function PassengerTrip() {
   if (trip.status === 'cancelled') {
     return (
       <Page>
-        <Card className="gap-1">
+        <Card className="gap-1.5">
           <p className="t-caption text-brand">{trip.title}</p>
-          <p className="t-body">{trip.driver_name}님이 이 운행을 취소했어요.</p>
+          <h1 className="t-title">{trip.driver_name}님이 이 운행을 취소했어요</h1>
+          <p className="t-body text-sub">낼 금액은 없어요. 다시 함께 타기로 했다면 운전자에게 새 링크를 받아 주세요</p>
         </Card>
       </Page>
     );
@@ -489,6 +493,7 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
   const mine = s.shares.find((x) => x.is_me);
   const rule = s.rule ?? trip.rule;
   const withDriver = s.include_driver ?? trip.include_driver;
+  if (!mine) return <NoShare trip={trip} deviceKey={deviceKey} />;
 
   return (
     <Page gap={14}>
@@ -597,6 +602,29 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
   );
 }
 
+// Joined but the car has no ride for this person (못 탄 사람): nothing to pay for this trip.
+function NoShare({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
+  return (
+    <Page gap={14}>
+      <Card className="gap-1.5">
+        <p className="t-caption text-brand">운행이 끝났어요 | {trip.title}</p>
+        <h1 className="t-title">이번 운행에는 낼 몫이 없어요</h1>
+        <p className="t-body text-sub">
+          {trip.driver_name}님 차에 탑승 기록이 없어 정산에서 빠졌어요. 실제로 탔다면 아래에서 알려 주세요
+        </p>
+      </Card>
+      <PayActions
+        bank={null}
+        driverName={trip.driver_name}
+        context={`${trip.title} | 탑승 기록 없음`}
+        onReport={(kind, message) =>
+          rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_kind: kind, p_message: message })
+        }
+      />
+    </Page>
+  );
+}
+
 // The place kept for the favourite's next trip. Only the driver deletes it (favourites x); a passenger
 // who wants it gone asks the driver outside the app.
 function SavedPlace({ trip }: { trip: PublicTrip }) {
@@ -634,10 +662,12 @@ function FolderView({ trip }: { trip: PublicTrip }) {
           {f.name}: 지금까지 {f.rides.length}회
         </p>
         <Amount value={f.my_total} />
-        {today && (
+        {today ? (
           <p className="t-caption text-sub">
             {isToday(today.date) ? '오늘' : dayLabel(today.date)} {today.title} {won(today.amount)}이 더해졌어요
           </p>
+        ) : (
+          <p className="t-caption text-sub">이번 운행은 탑승 기록이 없어 쌓이지 않았어요</p>
         )}
         <div className="w-full rounded-xl bg-brand-soft px-3.5 py-3">
           <p className="t-caption text-brand">

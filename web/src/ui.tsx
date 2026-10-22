@@ -39,6 +39,7 @@ export function Page({
   tag?: string;
   gap?: 14 | 16;
 }) {
+  const online = useOnline();
   return (
     <div
       className="mx-auto flex min-h-dvh max-w-[430px] flex-col px-5 pt-6 pb-7"
@@ -55,9 +56,29 @@ export function Page({
           ) : undefined
         }
       />
+      {!online && (
+        <p role="status" className="t-caption w-full rounded-xl bg-amber-50 px-3.5 py-2.5 text-amber-800">
+          인터넷 연결이 끊겼어요. 지금 보이는 내용은 마지막으로 불러온 것이고, 다시 연결되면 자동으로 새로 불러와요
+        </p>
+      )}
       {children}
     </div>
   );
+}
+
+function useOnline() {
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => {
+      window.removeEventListener('online', up);
+      window.removeEventListener('offline', down);
+    };
+  }, []);
+  return online;
 }
 
 // Demo mode only: the driver pages stand in for the car screen, where trips are made and changed.
@@ -560,9 +581,14 @@ export function usePolling(load: () => Promise<void>, ms = 5000) {
     };
     tick();
     const id = window.setInterval(tick, ms);
+    // back online or back to the tab: refresh right away instead of waiting for the next tick
+    window.addEventListener('online', tick);
+    document.addEventListener('visibilitychange', tick);
     return () => {
       alive = false;
       window.clearInterval(id);
+      window.removeEventListener('online', tick);
+      document.removeEventListener('visibilitychange', tick);
     };
   }, [ms]);
 }
