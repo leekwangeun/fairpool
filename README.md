@@ -60,6 +60,17 @@ npm install
 npm run dev
 ```
 
+차 앱(에뮬레이터)과 웹을 같은 서버에 붙이려면 로컬 개발 서버를 씁니다. 자세한 내용은 [devserver/README.md](devserver/README.md)에 있습니다.
+
+```bash
+cd devserver
+npm install
+npm run reset   # DB를 새로 만들고 시연 데이터(지훈 차, 출근 카풀, 동아리 MT)를 넣음
+npm start       # http://localhost:54321, 에뮬레이터는 http://10.0.2.2:54321
+```
+
+웹은 `web/.env.local` 에 `VITE_API_URL=http://localhost:54321` 을 넣고 `npm run dev` 를 실행합니다.
+
 DB 함수 테스트:
 
 ```bash

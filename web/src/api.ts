@@ -4,9 +4,22 @@ import { createClient } from '@supabase/supabase-js';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-export const demoMode = !url || !anonKey;
+// the local dev server (fairpool/devserver), which answers the same POST /rest/v1/rpc/<fn> as Supabase
+const apiUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '');
+export const demoMode = !apiUrl && (!url || !anonKey);
 
-const supabase = demoMode ? null : createClient(url!, anonKey!, { auth: { persistSession: false } });
+const supabase = demoMode || apiUrl ? null : createClient(url!, anonKey!, { auth: { persistSession: false } });
+
+async function devServerRpc(fn: string, args: Record<string, unknown>) {
+  const res = await fetch(`${apiUrl}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error((body as { message?: string }).message ?? res.statusText);
+  return body;
+}
 
 const messages: Record<string, string> = {
   trip_not_found: '운행을 찾을 수 없어요. 링크를 다시 확인해 주세요.',
@@ -49,7 +62,9 @@ export class ApiError extends Error {
 export async function rpc<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
   let data: unknown;
   try {
-    if (supabase) {
+    if (apiUrl) {
+      data = await devServerRpc(fn, args);
+    } else if (supabase) {
       const res = await supabase.rpc(fn, args);
       if (res.error) throw res.error;
       data = res.data;
