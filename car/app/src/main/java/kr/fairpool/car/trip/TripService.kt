@@ -139,6 +139,12 @@ class TripService : Service() {
     private val occupancy = ConcurrentHashMap<SeatSlot, Boolean>()
     private val belt = ConcurrentHashMap<SeatSlot, Boolean>()
 
+    /**
+     * Vehicle SDK 2.3.2 turns SEAT_OCCUPANCY into `value == 1`, and in VHAL 1 is VACANT (2 is OCCUPIED).
+     * Measured on the Pleos emulator: Virtual Console "Occupied" (2) arrives as false, "Empty" (1) as true.
+     */
+    private fun isOccupied(sdkValue: Boolean?) = sdkValue == false
+
     /** A seat counts as taken when its occupancy sensor or its seat belt says so (rear seats may lack a sensor). */
     private fun seatChanged(slot: SeatSlot) {
         main.post { TripEngine.onSeat(slot, occupancy[slot] == true || belt[slot] == true) }
@@ -168,8 +174,8 @@ class TripService : Service() {
         for ((slot, value) in seatValues) {
             val area = SeatArea(value)
             seat.registerSeatOccupancy(area, object : SeatOccupancyListener {
-                override fun onSeatOccupancyUpdated(occupied: Boolean?) {
-                    occupancy[slot] = occupied == true
+                override fun onSeatOccupancyUpdated(value: Boolean?) {
+                    occupancy[slot] = isOccupied(value)
                     seatChanged(slot)
                 }
                 override fun onFailed(e: Exception) = fail("좌석 ${slot.label}", e)
@@ -181,7 +187,7 @@ class TripService : Service() {
                 }
                 override fun onFailed(e: Exception) = fail("벨트 ${slot.label}", e)
             })
-            seat.getCurrentSeatOccupancy(area, { occ -> occupancy[slot] = occ == true; seatChanged(slot) }, { })
+            seat.getCurrentSeatOccupancy(area, { occ -> occupancy[slot] = isOccupied(occ); seatChanged(slot) }, { })
             seat.getCurrentSeatBeltBuckledState(area, { b -> belt[slot] = b == true; seatChanged(slot) }, { })
         }
     }
