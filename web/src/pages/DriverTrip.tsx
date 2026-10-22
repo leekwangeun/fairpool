@@ -74,6 +74,18 @@ export default function DriverTrip() {
     }
   }
 
+  // Deleting is for the driver only. Before boarding the place leaves the stops (the car re-routes);
+  // after boarding the record can only be corrected until the settlement is complete.
+  function removePlace(id: string, name: string) {
+    if (!window.confirm(`${name} 님의 장소를 지울까요? 들를 곳에서 빠지고, 즐겨찾기에 남긴 장소도 지워져요.`)) return;
+    run(() => rpc('remove_passenger_place', { p_code: code, p_admin_secret: secret, p_passenger_id: id }));
+  }
+
+  function deleteRecord(id: string, name: string) {
+    if (!window.confirm(`${name} 님의 탑승 기록을 지울까요? 탑승, 하차 위치가 지워지고, 정산 금액은 이름 없이 남아요.`)) return;
+    run(() => rpc('delete_ride_record', { p_code: code, p_admin_secret: secret, p_passenger_id: id }));
+  }
+
   const cancel = () =>
     window.confirm('운행을 취소할까요? 동승자 링크도 닫혀요.') &&
     run(() => rpc('set_trip_status', { p_code: code, p_admin_secret: secret, p_status: 'cancelled' })).then(() => navigate('/'));
@@ -112,19 +124,38 @@ export default function DriverTrip() {
       <Card className="gap-3">
         <h2 className="t-strong">함께 타는 사람 {trip ? `${trip.passengers.length}명` : ''}</h2>
         {trip?.passengers.length === 0 && <p className="t-caption text-sub">아직 참여한 사람이 없어요.</p>}
-        {trip?.passengers.map((p) => (
-          <div key={p.id} className="rounded-xl bg-page px-4 py-3">
-            <p className="t-strong">
-              {p.name}
-              {p.boarded_at && <span className="t-caption ml-1.5 text-brand">{p.alighted_at ? '내림' : '탑승'}</span>}
-            </p>
-            <p className="t-caption mt-0.5 text-sub">
-              {p.place_removed_at && !p.pickup && !p.dropoff
-                ? `${p.name} 님이 장소를 지웠어요`
-                : `${p.pickup?.label ?? '출발지에서 탑승'} → ${p.dropoff?.label ?? '내릴 곳 미정'}`}
-            </p>
-          </div>
-        ))}
+        {trip?.passengers.map((p) => {
+          const live = trip.status === 'preparing' || trip.status === 'in_progress';
+          const canRemovePlace = live && !p.boarded_at && (p.pickup || p.dropoff);
+          const canDeleteRecord = p.settle_done && !p.record_deleted_at;
+          return (
+            <div key={p.id} className="flex items-center gap-3 rounded-xl bg-page px-4 py-3">
+              <div className="flex min-w-0 flex-1 flex-col">
+                <p className="t-strong">
+                  {p.name}
+                  {p.boarded_at && <span className="t-caption ml-1.5 text-brand">{p.alighted_at ? '내림' : '탑승'}</span>}
+                </p>
+                <p className="t-caption mt-0.5 text-sub">
+                  {p.record_deleted_at
+                    ? '탑승 기록을 지웠어요. 정산 금액은 남아요'
+                    : p.place_removed_at && !p.pickup && !p.dropoff
+                      ? '장소를 지웠어요'
+                      : `${p.pickup?.label ?? '출발지에서 탑승'} → ${p.dropoff?.label ?? '내릴 곳 미정'}`}
+                </p>
+              </div>
+              {canRemovePlace && (
+                <button type="button" onClick={() => removePlace(p.id, p.name)} className="t-caption shrink-0 rounded-lg border border-line bg-card px-2.5 py-1.5 text-sub">
+                  장소 지우기
+                </button>
+              )}
+              {canDeleteRecord && (
+                <button type="button" onClick={() => deleteRecord(p.id, p.name)} className="t-caption shrink-0 rounded-lg border border-line bg-card px-2.5 py-1.5 text-sub">
+                  탑승 기록 지우기
+                </button>
+              )}
+            </div>
+          );
+        })}
       </Card>
 
       {trip && trip.issues.length > 0 && (

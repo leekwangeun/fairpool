@@ -28,6 +28,8 @@ const messages: Record<string, string> = {
   nothing_to_settle: '아직 쌓인 운행이 없어요.',
   no_request: '정산 중인 묶음이 없어요.',
   page_not_found: '정산 페이지를 찾을 수 없어요. 운전자가 정산 요청을 취소했을 수 있어요.',
+  record_locked: '탑승이 기록된 뒤에는 정산이 완료될 때까지 지울 수 없고 정정만 할 수 있어요.',
+  settlement_not_done: '정산이 완료된 뒤에 탑승 기록을 지울 수 있어요.',
 };
 
 export class ApiError extends Error {
@@ -234,6 +236,8 @@ export type AdminPassenger = {
   alighted_at: string | null;
   paid_at: string | null;
   place_removed_at: string | null;
+  record_deleted_at: string | null;
+  settle_done: boolean;
 };
 
 export type AdminTrip = {

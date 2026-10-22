@@ -85,18 +85,13 @@ export default function PassengerTrip() {
   if (mode === 'edit' && open) return <Join trip={trip} deviceKey={deviceKey} onDone={done} onCancel={() => setMode('view')} />;
   if (trip.status === 'settled') {
     return trip.folder ? (
-      <FolderView trip={trip} deviceKey={deviceKey} onChange={setTrip} />
+      <FolderView trip={trip} />
     ) : (
-      <Settled trip={trip} deviceKey={deviceKey} onChange={setTrip} />
+      <Settled trip={trip} deviceKey={deviceKey} />
     );
   }
   return (
-    <Riding
-      trip={trip}
-      deviceKey={deviceKey}
-      onChange={setTrip}
-      onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined}
-    />
+    <Riding trip={trip} onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined} />
   );
 }
 
@@ -196,7 +191,7 @@ function Join({
         </Field>
         <p className="t-caption text-faint">
           {trip.carpool_code
-            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 언제든 지울 수 있어요'
+            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 지우고 싶으면 운전자에게 말해 주세요'
             : '정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요'}
         </p>
       </Card>
@@ -305,17 +300,7 @@ function stopText(s: Stop, origin: string | null): { title: string; sub?: string
   }
 }
 
-function Riding({
-  trip,
-  deviceKey,
-  onChange,
-  onEdit,
-}: {
-  trip: PublicTrip;
-  deviceKey: string;
-  onChange: (t: PublicTrip) => void;
-  onEdit?: () => void;
-}) {
+function Riding({ trip, onEdit }: { trip: PublicTrip; onEdit?: () => void }) {
   const me = trip.me!;
   const stops: Stop[] = trip.progress?.stops ?? [
     { kind: 'start', label: trip.origin ?? undefined, state: 'next' },
@@ -415,21 +400,8 @@ function Riding({
           탈 곳, 내릴 곳 바꾸기
         </button>
       )}
-      {me.place_removed ? (
-        <p className="t-caption text-center text-sub">내 장소를 지웠어요. {trip.driver_name}님 차에는 다음 시동 때 반영돼요</p>
-      ) : (
-        (me.pickup || me.dropoff) && (
-          <button
-            type="button"
-            onClick={async () => {
-              if (!window.confirm('내 장소를 지울까요? 남은 경로에서도 빠지고, 지난 운행 기록과 정산 금액은 남아요.')) return;
-              onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
-            }}
-            className="t-caption text-sub underline underline-offset-2"
-          >
-            내 장소 지우기
-          </button>
-        )
+      {me.place_removed && (
+        <p className="t-caption text-center text-sub">{trip.driver_name}님이 내 장소를 지웠어요</p>
       )}
     </Page>
   );
@@ -443,7 +415,7 @@ const ruleText = {
   equal: '총비용을 똑같이 나눴어요.',
 };
 
-function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
   const s = trip.settlement!;
   const me = trip.me!;
   const mine = s.shares.find((x) => x.is_me);
@@ -528,7 +500,7 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
         )}
       </Card>
 
-      <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
+      <SavedPlace trip={trip} />
 
       {(hasPoint(me.pickup) || hasPoint(me.dropoff)) && (
         <CourseMap height={170} pickup={hasPoint(me.pickup) ? me.pickup : null} dropoff={hasPoint(me.dropoff) ? me.dropoff : null} />
@@ -552,28 +524,18 @@ function Settled({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: s
   );
 }
 
-// "내 장소 지우기": removed right away, no driver approval; the car picks it up at the next ignition.
-// Past trip records and settled amounts stay.
-function SavedPlace({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+// The place kept for the favourite's next trip. Only the driver deletes it (favourites x); a passenger
+// who wants it gone asks the driver outside the app.
+function SavedPlace({ trip }: { trip: PublicTrip }) {
   const me = trip.me!;
   const places = [me.pickup?.label, me.dropoff?.label].filter(Boolean).join(', ');
-  if (me.place_removed) {
-    return <p className="t-caption text-center text-sub">내 장소를 지웠어요. {trip.driver_name}님 차에는 다음 시동 때 반영돼요</p>;
-  }
   if (!trip.carpool_code || !me.save_place || !places) return null;
-
-  async function forget() {
-    if (!window.confirm('내 장소를 지울까요? 지난 운행 기록과 정산 금액은 남아요.')) return;
-    onChange(await rpc<PublicTrip>('forget_my_place', { p_code: trip.code, p_device_key: deviceKey }));
-  }
-
   return (
-    <section className="flex w-full flex-col items-start gap-2 rounded-[20px] bg-brand-soft px-[18px] py-4">
+    <section className="flex w-full flex-col items-start gap-1 rounded-[20px] bg-brand-soft px-[18px] py-4">
       <p className="t-strong text-brand">{trip.driver_name}님 차에 내 장소가 저장됐어요</p>
-      <p className="t-caption text-sub">다음에 이 카풀로 운행하면 {josa(places, '이', '가')} 바로 채워져요</p>
-      <button type="button" onClick={forget} className="t-strong rounded-[10px] border-[1.5px] border-line bg-card px-3.5 py-2 text-sub">
-        내 장소 지우기
-      </button>
+      <p className="t-caption text-sub">
+        다음에 이 카풀로 운행하면 {josa(places, '이', '가')} 바로 채워져요. 지우고 싶으면 {trip.driver_name}님에게 말해 주세요
+      </p>
     </section>
   );
 }
@@ -582,7 +544,7 @@ function SavedPlace({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey
 
 // Folder trips have no settlement page of their own. Until the driver presses 합쳐서 정산하기 the page
 // shows the running sum; after that it goes to the one settlement page of the batch (/s/<code>).
-function FolderView({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey: string; onChange: (t: PublicTrip) => void }) {
+function FolderView({ trip }: { trip: PublicTrip }) {
   const f = trip.folder!;
   if (f.page) return <Navigate to={`/s/${f.page}`} replace />;
   const amounts = f.rides.map((r) => r.amount);
@@ -617,7 +579,7 @@ function FolderView({ trip, deviceKey, onChange }: { trip: PublicTrip; deviceKey
           <p className="t-caption text-sub">같은 길을 같은 사람과 다녀서 계산 결과가 같아요. 길이 달라지면 그날 금액도 달라져요</p>
         </Card>
       )}
-      <SavedPlace trip={trip} deviceKey={deviceKey} onChange={onChange} />
+      <SavedPlace trip={trip} />
     </Page>
   );
 }

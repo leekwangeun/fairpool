@@ -179,7 +179,8 @@ create table public.trip_passengers (
   boarded_at      timestamptz,
   alighted_at     timestamptz,
   paid_at         timestamptz,           -- 바로 정산: the driver confirmed this passenger paid
-  place_removed_at timestamptz,          -- "내 장소 지우기"; the car picks it up at the next ignition
+  place_removed_at  timestamptz,         -- the driver removed this passenger's place before boarding
+  record_deleted_at timestamptz,         -- the driver deleted this ride record after settlement
   unique (trip_id, device_key_hash)
 );
 
@@ -276,15 +277,30 @@ begin
   return c;
 end $$;
 
+-- 정산 완료 for one passenger: 바로 정산 marked paid, or their part of a requested folder batch paid.
+-- Until then the ride record is the basis of the settlement and can only be corrected.
+create or replace function public._settle_done(t public.trips, p public.trip_passengers) returns boolean
+language sql stable set search_path = public, extensions as $$
+  select case
+    when t.status <> 'settled' then false
+    when t.settle_mode = 'direct' then p.paid_at is not null
+    when t.settle_mode = 'folder' then exists (
+      select 1 from public.folder_batches b join public.batch_payments bp on bp.batch_id = b.id
+      where b.id = t.batch_id and b.status <> 'open' and bp.device_key_hash = p.device_key_hash
+        and bp.paid_at is not null)
+    else false end
+$$;
+
 create or replace function public._passengers_admin(p_trip uuid) returns jsonb
 language sql stable set search_path = public, extensions as $$
   select coalesce(jsonb_agg(jsonb_build_object(
            'id', id, 'name', name, 'pickup', pickup, 'dropoff', dropoff, 'seat', seat,
            'save_place', save_place, 'estimate', estimate, 'paid_at', paid_at,
-           'place_removed_at', place_removed_at,
+           'place_removed_at', place_removed_at, 'record_deleted_at', record_deleted_at,
+           'settle_done', (select public._settle_done(t, x) from public.trips t where t.id = x.trip_id),
            'joined_at', joined_at, 'boarded_at', boarded_at, 'alighted_at', alighted_at)
          order by joined_at), '[]'::jsonb)
-  from public.trip_passengers where trip_id = p_trip
+  from public.trip_passengers x where x.trip_id = p_trip
 $$;
 
 -- What one passenger may see of the course: the origin, their own stops, and anonymous
@@ -556,33 +572,6 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
--- "내 장소 지우기": the passenger removes their own place right away, no driver approval. The place kept
--- for the favourite's next trip goes and saving stops; on a trip not finished yet the stops go too (the
--- car then asks NaviHelper for the whole route again with requestRouteWithWaypoints). Past trip records
--- and settled amounts stay.
-create or replace function public.forget_my_place(p_code text, p_device_key text) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare
-  t public.trips;
-  me public.trip_passengers;
-  live boolean;
-begin
-  select * into t from public.trips where code = upper(p_code);
-  if t.id is null then raise exception 'trip_not_found'; end if;
-  select * into me from public.trip_passengers
-   where trip_id = t.id and device_key_hash = public._hash(p_device_key);
-  if me.id is null then raise exception 'not_allowed'; end if;
-  live := t.status in ('preparing', 'in_progress');
-  update public.trip_passengers set
-    save_place = false, place_removed_at = now(),
-    pickup = case when live then null else pickup end,
-    dropoff = case when live then null else dropoff end
-  where id = me.id;
-  update public.carpool_members set pickup = null, dropoff = null
-  where carpool_id = t.carpool_id and device_key_hash = me.device_key_hash;
-  return public.get_trip(p_code, p_device_key);
-end $$;
-
 create or replace function public.report_issue(p_code text, p_device_key text, p_message text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
@@ -635,6 +624,64 @@ begin
                  'name', (select name from public.trip_passengers p where p.id = i.passenger_id))
                  order by i.created_at), '[]'::jsonb)
                from public.trip_issues i where i.trip_id = t.id));
+end $$;
+
+-- Deleting is for the driver only (car app or driver page); passengers ask the driver outside the app.
+-- Before boarding is recorded: the place leaves the stops (the car asks NaviHelper for the whole route
+-- again with requestRouteWithWaypoints) and the place kept for the favourite goes too. After boarding
+-- the place is part of the ride record and can only be corrected until the settlement is complete.
+create or replace function public.remove_passenger_place(p_code text, p_admin_secret text, p_passenger_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  t public.trips := public._trip_admin(p_code, p_admin_secret);
+  p public.trip_passengers;
+begin
+  select * into p from public.trip_passengers where id = p_passenger_id and trip_id = t.id;
+  if p.id is null then raise exception 'not_allowed'; end if;
+  if p.boarded_at is not null or t.status not in ('preparing', 'in_progress') then
+    raise exception 'record_locked';
+  end if;
+  update public.trip_passengers set pickup = null, dropoff = null, save_place = false, place_removed_at = now()
+  where id = p.id;
+  update public.carpool_members set pickup = null, dropoff = null
+  where carpool_id = t.carpool_id and device_key_hash = p.device_key_hash;
+  return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
+-- After the settlement is complete the driver may delete a ride record (운행 기록 화면). Only this
+-- passenger's boarding and drop-off go; the trip, the settled amounts and the corrections stay, and the
+-- share is kept without a name ("기록을 지운 동승자") so totals still add up.
+create or replace function public.delete_ride_record(p_code text, p_admin_secret text, p_passenger_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  t public.trips := public._trip_admin(p_code, p_admin_secret);
+  p public.trip_passengers;
+  anon constant text := '기록을 지운 동승자';
+begin
+  select * into p from public.trip_passengers where id = p_passenger_id and trip_id = t.id;
+  if p.id is null then raise exception 'not_allowed'; end if;
+  if p.record_deleted_at is not null then return public.get_trip_admin(p_code, p_admin_secret); end if;
+  if not public._settle_done(t, p) then raise exception 'settlement_not_done'; end if;
+  update public.settlements set payload = jsonb_set(payload, '{shares}', (
+    select coalesce(jsonb_agg(case when x ->> 'passenger_id' = p.id::text
+                                   then (x - 'from' - 'to' - 'km') || jsonb_build_object('name', anon)
+                                   else x end order by ord), '[]'::jsonb)
+    from jsonb_array_elements(payload -> 'shares') with ordinality as y(x, ord)))
+  where trip_id = t.id;
+  update public.settlement_revisions set payload = jsonb_set(payload, '{shares}', (
+    select coalesce(jsonb_agg(case when x ->> 'passenger_id' = p.id::text
+                                   then (x - 'from' - 'to' - 'km') || jsonb_build_object('name', anon)
+                                   else x end order by ord), '[]'::jsonb)
+    from jsonb_array_elements(payload -> 'shares') with ordinality as y(x, ord)))
+  where trip_id = t.id and payload ? 'shares';
+  update public.trip_passengers set
+    name = anon, pickup = null, dropoff = null, seat = null, boarded_at = null, alighted_at = null,
+    phone4_hash = null, save_place = false, record_deleted_at = now(),
+    device_key_hash = public._hash(id::text || ':deleted')
+  where id = p.id;
+  return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
 create or replace function public.set_trip_status(p_code text, p_admin_secret text, p_status text) returns jsonb
@@ -1301,7 +1348,7 @@ declare
   fn text;
   api text[] := array[
     'create_driver', 'update_driver', 'get_driver',
-    'create_trip', 'get_trip', 'join_trip', 'verify_device', 'leave_trip', 'forget_my_place', 'report_issue',
+    'create_trip', 'get_trip', 'join_trip', 'verify_device', 'leave_trip', 'report_issue', 'remove_passenger_place', 'delete_ride_record',
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
     'get_trip_admin', 'set_trip_status', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',

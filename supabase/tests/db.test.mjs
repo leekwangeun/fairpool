@@ -265,17 +265,22 @@ test('saved carpool recreates the trip with the same members and adds up the mon
   await rpc(db, 'post_settlement', { p_code: next.code, p_admin_secret: next.admin_secret,
                                      p_payload: await shareFor(next.code, next.admin_secret) });
 
-  // 내 장소 지우기: the passenger removes it right away, no driver approval; the finished trip's record stays
-  const forgot = await rpc(db, 'forget_my_place', { p_code: next.code, p_device_key: device(1) });
-  assert.equal(forgot.me.place_removed, true);
-  assert.equal(forgot.me.save_place, false);
+  // only the driver deletes; a finished trip's place is part of its record until the settlement is complete
   const sujinRow = (await rpc(db, 'get_trip_admin', { p_code: next.code, p_admin_secret: next.admin_secret }))
     .passengers.find((p) => p.name === '수진');
-  assert.ok(sujinRow.place_removed_at, 'the car sees it at the next ignition');
-  assert.equal(sujinRow.pickup.label, '버스정류장', 'the record of a finished trip is not deleted');
+  await assert.rejects(rpc(db, 'remove_passenger_place', { p_code: next.code, p_admin_secret: next.admin_secret,
+                                                           p_passenger_id: sujinRow.id }), /record_locked/);
+  // the x on the favourites screen removes the place kept for the next trip; the record stays
+  const sujinMember = (await rpc(db, 'get_driver', { p_driver_secret: driver_secret })).carpools[0].members
+    .find((m) => m.name === '수진');
+  await rpc(db, 'remove_member_place', { p_carpool_code: carpool_code, p_secret: driver_secret,
+                                         p_member_id: sujinMember.id });
+  const kept = (await rpc(db, 'get_trip_admin', { p_code: next.code, p_admin_secret: next.admin_secret }))
+    .passengers.find((p) => p.name === '수진');
+  assert.equal(kept.pickup.label, '버스정류장', 'the record of a finished trip is not deleted');
   const third = await rpc(db, 'recreate_trip', { p_carpool_code: carpool_code, p_driver_secret: driver_secret });
   const cleared = await rpc(db, 'get_trip', { p_code: third.code, p_device_key: device(1) });
-  assert.equal(cleared.me.pickup, null, '내 장소 지우기 removes the kept place');
+  assert.equal(cleared.me.pickup, null, 'the x removes the kept place');
   assert.equal(cleared.me.save_place, false, 'and the choice sticks');
   // editing the stop again later does not silently turn saving back on
   await rpc(db, 'join_trip', { p_code: third.code, p_device_key: device(1), p_name: '수진', p_pickup: place('새 정류장') });
@@ -420,25 +425,50 @@ test('records are corrected, never deleted: removing my place during a trip and 
                                p_pickup: place('정류장'), p_dropoff: place('집') });
   await rpc(db, 'set_trip_status', { p_code: code, p_admin_secret: admin_secret, p_status: 'in_progress' });
 
-  // removed while driving: the stops leave the route, so the car asks NaviHelper for the whole route again
-  await rpc(db, 'forget_my_place', { p_code: code, p_device_key: device(1) });
+  await rpc(db, 'join_trip', { p_code: code, p_device_key: device(2), p_name: '서연', p_dropoff: place('서연 집') });
   let admin = await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret });
-  const minji = admin.passengers[0];
-  assert.ok(minji.place_removed_at);
-  assert.equal(minji.pickup, null);
-  assert.equal(minji.dropoff, null);
-  assert.equal(minji.save_place, false);
-  await assert.rejects(rpc(db, 'forget_my_place', { p_code: code, p_device_key: device(9) }), /not_allowed/);
+  const minji = admin.passengers.find((p) => p.name === '민지');
+  const seoyeon = admin.passengers.find((p) => p.name === '서연');
+
+  // before boarding the driver removes a place: it leaves the stops, so the car asks NaviHelper for the
+  // whole route again
+  admin = await rpc(db, 'remove_passenger_place', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: seoyeon.id });
+  const removed = admin.passengers.find((p) => p.id === seoyeon.id);
+  assert.ok(removed.place_removed_at);
+  assert.equal(removed.dropoff, null);
+  // after boarding it is part of the ride record: corrected only, until the settlement is complete
+  await rpc(db, 'mark_passenger', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji.id, p_boarded: true });
+  await assert.rejects(rpc(db, 'remove_passenger_place', { p_code: code, p_admin_secret: admin_secret,
+                                                           p_passenger_id: minji.id }), /record_locked/);
 
   // settling again keeps the result it replaces, with the reason
-  const payload = (amount) => ({ total: 5000, shares: [{ passenger_id: minji.id, name: '민지', amount }] });
+  const payload = (amount) => ({ total: 5000, shares: [{ passenger_id: minji.id, name: '민지', amount, from: '정류장', to: '집' },
+                                                       { passenger_id: null, name: '운전자', role: 'driver', amount: 5000 - amount }] });
   await rpc(db, 'post_settlement', { p_code: code, p_admin_secret: admin_secret, p_payload: payload(3000) });
   admin = await rpc(db, 'post_settlement', { p_code: code, p_admin_secret: admin_secret, p_payload: payload(2500),
-                                             p_reason: '내 장소 삭제 요청 승인' });
+                                             p_reason: '하차 위치 정정' });
   assert.equal(admin.settlement.shares[0].amount, 2500);
   assert.equal(admin.revisions.length, 1);
-  assert.equal(admin.revisions[0].reason, '내 장소 삭제 요청 승인');
+  assert.equal(admin.revisions[0].reason, '하차 위치 정정');
   assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) })).corrections, 1);
+
+  // the ride record can be deleted only once the settlement is complete, by the driver
+  await assert.rejects(rpc(db, 'delete_ride_record', { p_code: code, p_admin_secret: admin_secret,
+                                                       p_passenger_id: minji.id }), /settlement_not_done/);
+  await rpc(db, 'choose_settlement', { p_code: code, p_admin_secret: admin_secret, p_mode: 'direct' });
+  await rpc(db, 'mark_paid', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji.id });
+  admin = await rpc(db, 'delete_ride_record', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji.id });
+  const gone = admin.passengers.find((p) => p.id === minji.id);
+  assert.ok(gone.record_deleted_at);
+  assert.equal(gone.name, '기록을 지운 동승자');
+  assert.equal(gone.pickup, null);
+  assert.equal(gone.boarded_at, null);
+  // the trip, the amounts and the corrections stay; the share is kept without a name
+  assert.deepEqual(admin.settlement.shares.map((x) => [x.name, x.amount]), [['기록을 지운 동승자', 2500], ['운전자', 2500]]);
+  assert.equal(admin.settlement.shares[0].from, undefined);
+  assert.equal(admin.revisions.length, 1);
+  assert.ok(!JSON.stringify(admin).includes('민지'), 'the name is gone from the record and the corrections');
+  assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) })).me, null);
 
   // wrong digits are counted (not rolled back with an error) and lock the page after 20 tries
   for (let i = 0; i < 20; i++) {
