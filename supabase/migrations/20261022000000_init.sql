@@ -904,7 +904,15 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
--- Seat matching and boarding events reported by the car.
+-- Once anyone in a trip has settled (paid), nothing in it can be corrected: Shapley shares depend on one
+-- another, so changing anyone's ride would change the part that was already paid. Undoing every
+-- 정산 완료 tick (바로 정산) opens corrections again; a requested folder batch stays batch_locked.
+create or replace function public._settle_started(t public.trips) returns boolean
+language sql stable set search_path = public, extensions as $$
+  select exists (select 1 from public.trip_passengers p where p.trip_id = t.id and public._settle_done(t, p))
+$$;
+
+-- Seat matching and boarding events reported by the car (also corrections from the arrival screen).
 create or replace function public.mark_passenger(
   p_code text, p_admin_secret text, p_passenger_id uuid,
   p_seat text default null, p_boarded boolean default null, p_alighted boolean default null
@@ -912,6 +920,7 @@ create or replace function public.mark_passenger(
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
+  if public._settle_started(t) then raise exception 'settle_started'; end if;
   update public.trip_passengers set
     seat = coalesce(p_seat, seat),
     boarded_at = case when p_boarded is true then coalesce(boarded_at, now()) else boarded_at end,
@@ -922,7 +931,8 @@ end $$;
 
 -- Posting again corrects the settlement (a seat fixed after arrival, a removed place): the previous
 -- result is kept in settlement_revisions with the reason. A trip whose folder batch was already
--- requested cannot change, since passengers were told a fixed sum.
+-- requested cannot change, since passengers were told a fixed sum, and neither can a trip in which
+-- anyone has already settled (_settle_started).
 create or replace function public.post_settlement(p_code text, p_admin_secret text, p_payload jsonb,
                                                   p_reason text default null) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
@@ -946,17 +956,7 @@ begin
     if t.batch_id is not null and (select status from public.folder_batches where id = t.batch_id) <> 'open' then
       raise exception 'batch_locked';
     end if;
-    -- a part already settled (paid) cannot change any more; corrections are only for parts in progress
-    if exists (
-      select 1 from public.trip_passengers p
-      where p.trip_id = t.id and public._settle_done(t, p)
-        and (select sum((x ->> 'amount')::numeric) from jsonb_array_elements(old.payload -> 'shares') x
-             where x ->> 'passenger_id' = p.id::text)
-            is distinct from
-            (select sum((x ->> 'amount')::numeric) from jsonb_array_elements(clean -> 'shares') x
-             where x ->> 'passenger_id' = p.id::text)) then
-      raise exception 'settle_done';
-    end if;
+    if public._settle_started(t) then raise exception 'settle_started'; end if;
     insert into public.settlement_revisions (trip_id, payload, reason) values (t.id, old.payload, p_reason);
   end if;
   insert into public.settlements (trip_id, payload) values (t.id, clean)
@@ -1237,13 +1237,18 @@ begin
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
--- 바로 정산: the driver ticks a passenger as paid; their page then hides the account.
+-- 바로 정산: the driver ticks a passenger as paid; their page then hides the account. Untick everyone to
+-- correct the trip again. A deleted ride record stays settled: its stops are gone, so it cannot be redone.
 create or replace function public.mark_paid(p_code text, p_admin_secret text, p_passenger_id uuid,
                                             p_paid boolean default true) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
   if t.settle_mode is distinct from 'direct' then raise exception 'not_direct'; end if;
+  if not p_paid and exists (select 1 from public.trip_passengers
+                            where id = p_passenger_id and trip_id = t.id and record_deleted_at is not null) then
+    raise exception 'record_deleted';
+  end if;
   update public.trip_passengers set paid_at = case when p_paid then coalesce(paid_at, now()) end
   where id = p_passenger_id and trip_id = t.id;
   return public.get_trip_admin(p_code, p_admin_secret);

@@ -260,7 +260,7 @@ test('car corrections: direct trip shows the new amount, folder sums follow, req
     p_payload: { total: 1, shares: [] } }), /batch_locked/, 'passengers were told a fixed sum');
 });
 
-test('a part already settled cannot be corrected; parts still in progress can', async () => {
+test('once anyone in a trip has settled, nothing in it can be corrected until every tick is undone', async () => {
   const db = await freshDb();
   const { driver_secret } = await driverWithCar(db);
   const t = await ride(db, driver_secret, [[1, '수진', 2430], [2, '민호', 1780]]);
@@ -270,32 +270,45 @@ test('a part already settled cannot be corrected; parts still in progress can', 
     { passenger_id: t.ids['수진'], name: '수진', amount: sujin },
     { passenger_id: t.ids['민호'], name: '민호', amount: minho },
     { passenger_id: null, name: '지훈', role: 'driver', amount: 3000 }] });
-  await assert.rejects(rpc(db, 'post_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_reason: '정정',
-                                                    p_payload: payload(3000, 1780) }), /settle_done/);
-  const v = await rpc(db, 'get_trip', { p_code: t.code, p_device_key: device(1) });
-  assert.equal(v.settlement.shares.find((s) => s.is_me).amount, 2430);
-  assert.equal(v.paid, true);
-  // 민호 has not paid yet, so his part can still be corrected while 수진's stays as it was
-  const fixed = await rpc(db, 'post_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_reason: '하차 정정',
-                                                   p_payload: payload(2430, 1500) });
+  const correct = (sujin, minho) => rpc(db, 'post_settlement', { p_code: t.code, p_admin_secret: t.admin_secret,
+                                                                p_reason: '하차 정정', p_payload: payload(sujin, minho) });
+  // Shapley shares depend on one another: even a correction that leaves 수진's part as it is is refused
+  await assert.rejects(correct(2430, 1500), /settle_started/, 'another rider\'s part cannot change either');
+  await assert.rejects(correct(3000, 1780), /settle_started/);
+  await assert.rejects(rpc(db, 'mark_passenger', { p_code: t.code, p_admin_secret: t.admin_secret,
+                                                   p_passenger_id: t.ids['민호'], p_seat: '2열 오른쪽' }), /settle_started/,
+                       'boarding and seat corrections change the amounts too');
+  const v = await rpc(db, 'get_trip', { p_code: t.code, p_device_key: device(2) });
+  assert.equal(v.settlement.shares.find((s) => s.is_me).amount, 1780);
+  assert.equal(v.corrections, 0);
+
+  // with every 정산 완료 tick undone the trip can be corrected again
+  await rpc(db, 'mark_paid', { p_code: t.code, p_admin_secret: t.admin_secret, p_passenger_id: t.ids['수진'], p_paid: false });
+  const fixed = await correct(2500, 1500);
   assert.equal(fixed.settlement.shares.find((s) => s.name === '민호').amount, 1500);
   assert.equal(fixed.revisions.length, 1);
+  await rpc(db, 'mark_passenger', { p_code: t.code, p_admin_secret: t.admin_secret, p_passenger_id: t.ids['민호'],
+                                    p_seat: '2열 오른쪽' });
 });
 
-test('a deleted ride record stays without a name when the car posts a correction', async () => {
+test('a deleted ride record keeps the trip settled and stays without a name', async () => {
   const db = await freshDb();
   const { driver_secret } = await driverWithCar(db);
   const t = await ride(db, driver_secret, [[1, '수진', 2430]]);
   await rpc(db, 'choose_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_mode: 'direct' });
   await rpc(db, 'mark_paid', { p_code: t.code, p_admin_secret: t.admin_secret, p_passenger_id: t.ids['수진'] });
   await rpc(db, 'delete_ride_record', { p_code: t.code, p_admin_secret: t.admin_secret, p_passenger_id: t.ids['수진'] });
-  const after = await rpc(db, 'post_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_reason: '정정',
+  // its stops are gone, so the tick cannot be undone and the trip cannot be recalculated
+  await assert.rejects(rpc(db, 'mark_paid', { p_code: t.code, p_admin_secret: t.admin_secret,
+                                              p_passenger_id: t.ids['수진'], p_paid: false }), /record_deleted/);
+  await assert.rejects(rpc(db, 'post_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_reason: '정정',
     p_payload: { total: 5430, shares: [{ passenger_id: t.ids['수진'], name: '수진', amount: 2430, from: '집', to: '회사', km: 10 },
-                                       { passenger_id: null, name: '지훈', role: 'driver', amount: 3000 }] } });
+                                       { passenger_id: null, name: '지훈', role: 'driver', amount: 3000 }] } }),
+                       /settle_started/);
+  const after = await rpc(db, 'get_trip_admin', { p_code: t.code, p_admin_secret: t.admin_secret });
   const share = after.settlement.shares[0];
   assert.equal(share.name, '기록을 지운 동승자');
   assert.equal(share.amount, 2430, 'the amount stays so the total adds up');
-  assert.equal(share.from, undefined);
   assert.ok(!JSON.stringify(after).includes('수진'));
 });
 
