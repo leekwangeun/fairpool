@@ -30,6 +30,9 @@ const messages: Record<string, string> = {
   page_not_found: '정산 페이지를 찾을 수 없어요. 운전자가 정산 요청을 취소했을 수 있어요.',
   record_locked: '탑승이 기록된 뒤에는 정산이 완료될 때까지 지울 수 없고 정정만 할 수 있어요.',
   settlement_not_done: '정산이 완료된 뒤에 탑승 기록을 지울 수 있어요.',
+  not_chosen: '바로 정산이나 폴더에 쌓기를 먼저 골라 주세요.',
+  phone4_required: '휴대폰 번호 뒤 4자리를 입력해 주세요.',
+  bad_phone4: '휴대폰 번호 뒤 4자리는 숫자 4개예요.',
 };
 
 export class ApiError extends Error {
@@ -200,6 +203,23 @@ export type SettlePage = {
   } | null;
   bank: Bank | null;
 };
+
+// "내 휴대폰으로 보내기" from the car: a settlement the driver passes on from their own phone after
+// the driver's name and last 4 digits on M1-1 or the settlement page. Read-only.
+export type ShareCard = {
+  kind: 'trip' | 'batch';
+  code: string;
+  title: string;
+  date: string;
+  settle_mode?: SettleMode | null;
+  folder?: string | null;
+  total: number | null;
+  people: { name: string; amount: number; from?: string | null; to?: string | null; trips?: number; paid: boolean }[];
+  rides?: { title: string; date: string; shares: { name: string; amount: number; from?: string | null; to?: string | null }[] }[];
+  bank: Bank | null;
+};
+
+export type DriverView = { driver_name: string; cards: ShareCard[] };
 
 export type BatchSummary = {
   trips: { code: string; title: string; date: string; total: number; km: number | null;

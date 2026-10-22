@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
-import { rpc, ruleName, type Place, type PublicTrip, type Stop } from '../api';
+import { rpc, ruleName, type DriverView, type Place, type PublicTrip, type Stop } from '../api';
 import { store } from '../store';
+import DriverSend from './DriverSend';
 import {
   Amount,
   BatchPill,
@@ -40,6 +41,7 @@ export default function PassengerTrip() {
   const [trip, setTrip] = useState<PublicTrip | null>(null);
   const [notFound, setNotFound] = useState<string | null>(null);
   const [mode, setMode] = useState<'view' | 'edit' | 'verify'>('view');
+  const [driverView, setDriverView] = useState<DriverView | null>(null);
 
   async function load() {
     try {
@@ -78,8 +80,11 @@ export default function PassengerTrip() {
     setMode('view');
   };
 
+  if (driverView) return <DriverSend view={driverView} />;
   if (!trip.me) {
-    if (mode === 'verify' || !open) return <Verify trip={trip} deviceKey={deviceKey} onDone={done} onBack={open ? () => setMode('view') : undefined} />;
+    if (mode === 'verify' || !open) {
+      return <Verify trip={trip} deviceKey={deviceKey} onDone={done} onDriver={setDriverView} onBack={open ? () => setMode('view') : undefined} />;
+    }
     return <Join trip={trip} deviceKey={deviceKey} onDone={done} onVerify={() => setMode('verify')} />;
   }
   if (mode === 'edit' && open) return <Join trip={trip} deviceKey={deviceKey} onDone={done} onCancel={() => setMode('view')} />;
@@ -215,15 +220,19 @@ function Join({
 
 // ------------------------------------------------------------------ M1-1 다른 기기 확인
 
+// A passenger's name and digits re-open their page here; the driver's own (saved on the car) open
+// the read-only "내 휴대폰으로 보내기" view instead.
 function Verify({
   trip,
   deviceKey,
   onDone,
+  onDriver,
   onBack,
 }: {
   trip: PublicTrip;
   deviceKey: string;
   onDone: (t: PublicTrip) => void;
+  onDriver: (v: DriverView) => void;
   onBack?: () => void;
 }) {
   const [name, setName] = useState(store.myName());
@@ -233,7 +242,14 @@ function Verify({
   async function verify() {
     setError(null);
     try {
-      onDone(await rpc<PublicTrip>('verify_device', { p_code: trip.code, p_device_key: deviceKey, p_name: name, p_phone4: phone4 }));
+      const res = await rpc<PublicTrip | { driver_view: DriverView }>('verify_device', {
+        p_code: trip.code,
+        p_device_key: deviceKey,
+        p_name: name,
+        p_phone4: phone4,
+      });
+      if ('driver_view' in res) return onDriver(res.driver_view);
+      onDone(res);
       store.setMyName(name.trim());
     } catch (e) {
       setError((e as Error).message);
@@ -247,6 +263,7 @@ function Verify({
         <div className="flex flex-col gap-1">
           <h1 className="t-title">이 운행에 참여한 사람인가요?</h1>
           <p className="t-body text-sub">처음 참여한 휴대폰이 아니라서 한 번 확인할게요</p>
+          <p className="t-caption text-faint">{trip.driver_name}님이라면 차 화면에 넣은 이름과 번호 뒤 4자리로 보낼 정산을 볼 수 있어요</p>
         </div>
         <Field label="이름">
           <TextInput value={name} onChange={setName} />

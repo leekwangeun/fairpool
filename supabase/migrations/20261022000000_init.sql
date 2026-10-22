@@ -60,6 +60,10 @@ create table public.drivers (
   account_holder  bytea,                 -- encrypted with _enc
   bank_consent_at timestamptz,          -- shown only to passengers whose settlement is in progress
   car_only        boolean not null default false,  -- made by an unlinked car to hold its account (L1-9)
+  -- last 4 digits of the driver's phone, entered on the car (L1-9) with the name: opens the read-only
+  -- "내 휴대폰으로 보내기" view on any phone. Salted per driver so it survives moving to a linked driver.
+  phone4_salt     text,
+  phone4_hash     text,
   created_at      timestamptz not null default now()
 );
 
@@ -213,7 +217,19 @@ create table public.trip_issues (
   created_at   timestamptz not null default now()
 );
 
+-- "내 휴대폰으로 보내기" on the car: a settlement the driver wants to pass on from their own phone.
+-- One row per trip (바로 정산, or a trip still stacking in a folder) or per requested folder batch.
+create table public.share_requests (
+  id         uuid primary key default gen_random_uuid(),
+  trip_id    uuid references public.trips(id) on delete cascade,
+  batch_id   uuid references public.folder_batches(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  check ((trip_id is null) <> (batch_id is null))
+);
+
 create index on public.trips (driver_id, created_at desc);
+create unique index on public.share_requests (trip_id);
+create unique index on public.share_requests (batch_id);
 create index on public.trips (carpool_id, created_at desc);
 create index on public.trip_passengers (trip_id);
 create index on public.trip_issues (trip_id);
@@ -233,6 +249,7 @@ alter table public.folders         enable row level security;
 alter table public.folder_batches  enable row level security;
 alter table public.batch_payments  enable row level security;
 alter table public.settlement_revisions enable row level security;
+alter table public.share_requests  enable row level security;
 
 -- ---------------------------------------------------------------- internal lookups
 
@@ -455,6 +472,47 @@ begin
   return public.get_bank_account(p_vehicle_secret);
 end $$;
 
+-- 운전자 정보 입력 (car screen L1-9): the driver's name and the last 4 digits of their phone, saved with
+-- the account (set_bank_account). With them the driver opens "내 휴대폰으로 보내기" on any phone.
+create or replace function public.get_driver_info(p_vehicle_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v public.vehicles := public._vehicle(p_vehicle_secret);
+  d public.drivers;
+begin
+  if v.id is null then raise exception 'not_allowed'; end if;
+  select * into d from public.drivers where id = v.driver_id;
+  return jsonb_build_object(
+    'name', d.display_name,
+    'phone4_set', d.phone4_hash is not null,
+    'bank', public.get_bank_account(p_vehicle_secret));
+end $$;
+
+-- p_phone4 null keeps the digits saved before; they are needed once.
+create or replace function public.set_driver_info(p_vehicle_secret text, p_name text, p_phone4 text default null)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v public.vehicles := public._vehicle(p_vehicle_secret);
+  d public.drivers;
+  did uuid;
+  salt text;
+begin
+  if v.id is null then raise exception 'not_allowed'; end if;
+  if nullif(trim(p_name), '') is null then raise exception 'name_required'; end if;
+  if p_phone4 is not null and p_phone4 !~ '^[0-9]{4}$' then raise exception 'bad_phone4'; end if;
+  did := public._car_driver(v.id);
+  select * into d from public.drivers where id = did;
+  if p_phone4 is null and d.phone4_hash is null then raise exception 'phone4_required'; end if;
+  salt := coalesce(d.phone4_salt, public._secret());
+  update public.drivers set
+    display_name = trim(p_name),
+    phone4_salt = salt,
+    phone4_hash = case when p_phone4 is null then phone4_hash else public._hash(salt || p_phone4) end
+  where id = d.id;
+  return public.get_driver_info(p_vehicle_secret);
+end $$;
+
 -- ---------------------------------------------------------------- trips
 
 -- Called from the driver web page (driver secret) or the car (vehicle secret); both may be null
@@ -585,11 +643,14 @@ begin
 end $$;
 
 -- Re-open the page on another phone: name + last 4 digits must match the passenger who joined.
+-- The driver's own name and digits (saved on the car) open the read-only "내 휴대폰으로 보내기" view
+-- instead; nothing is bound to that phone and nothing can be changed from it.
 create or replace function public.verify_device(p_code text, p_device_key text, p_name text, p_phone4 text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips;
   pid uuid;
+  d public.drivers;
 begin
   if coalesce(length(p_device_key), 0) < 16 then raise exception 'bad_device_key'; end if;
   select * into t from public.trips where code = upper(p_code);
@@ -598,6 +659,10 @@ begin
   select id into pid from public.trip_passengers
    where trip_id = t.id and name = trim(p_name) and phone4_hash = public._hash(t.id::text || coalesce(p_phone4, ''));
   if pid is null then
+    d := public._owner(t.driver_id, t.vehicle_id);
+    if public._is_driver(d, p_name, p_phone4) then
+      return jsonb_build_object('driver_view', public._driver_view(d, t.id, t.batch_id));
+    end if;
     -- returned instead of raised, so the failure count is not rolled back
     update public.trips set verify_fails = verify_fails + 1 where id = t.id;
     return jsonb_build_object('error', 'verify_failed');
@@ -986,6 +1051,7 @@ language plpgsql security definer set search_path = public, extensions as $$
 declare
   b public.folder_batches;
   pid uuid;
+  d public.drivers;
 begin
   if coalesce(length(p_device_key), 0) < 16 then raise exception 'bad_device_key'; end if;
   select * into b from public.folder_batches where code = upper(p_code);
@@ -998,6 +1064,11 @@ begin
       and p.phone4_hash = public._hash(t.id::text || coalesce(p_phone4, '')))
   limit 1;
   if pid is null then
+    select o.* into d from public.folders f cross join lateral public._owner(f.driver_id, f.vehicle_id) o
+    where f.id = b.folder_id;
+    if public._is_driver(d, p_name, p_phone4) then
+      return jsonb_build_object('driver_view', public._driver_view(d, null, b.id));
+    end if;
     update public.folder_batches set verify_fails = verify_fails + 1 where id = b.id;
     return jsonb_build_object('error', 'verify_failed');
   end if;
@@ -1178,6 +1249,7 @@ begin
   where batch_id in (select id from public.folder_batches where folder_id = f.id and status = 'open');
   delete from public.folder_batches where folder_id = f.id and status = 'open';
   delete from public.batch_payments where batch_id = r;
+  delete from public.share_requests where batch_id = r;
   update public.folder_batches set status = 'open', requested_at = null, code = null, verify_fails = 0 where id = r;
   return public.get_folder_admin(p_folder_code, p_secret);
 end $$;
@@ -1199,6 +1271,133 @@ begin
     update public.folder_batches set status = 'done', done_at = now() where id = r;
   end if;
   return public.get_folder_admin(p_folder_code, p_secret);
+end $$;
+
+-- ---------------------------------------------------------------- 내 휴대폰으로 보내기
+
+-- The driver a trip or folder belongs to: its own, or the one of the car that made it.
+create or replace function public._owner(p_driver uuid, p_vehicle uuid) returns public.drivers
+language sql stable set search_path = public, extensions as $$
+  select * from public.drivers
+  where id = coalesce(p_driver, (select driver_id from public.vehicles where id = p_vehicle))
+$$;
+
+-- The name and last 4 digits the driver saved on the car (L1-9).
+create or replace function public._is_driver(d public.drivers, p_name text, p_phone4 text) returns boolean
+language sql stable set search_path = public, extensions as $$
+  select coalesce(d.id is not null and d.phone4_hash is not null and d.display_name = trim(p_name)
+                  and d.phone4_hash = public._hash(d.phone4_salt || coalesce(p_phone4, '')), false)
+$$;
+
+create or replace function public._bank_of(d public.drivers) returns jsonb
+language sql stable set search_path = public, extensions as $$
+  select case when d.bank_consent_at is null then null else jsonb_build_object(
+    'bank_name', d.bank_name, 'account', public._dec(d.bank_account), 'holder', public._dec(d.account_holder)) end
+$$;
+
+-- One trip's settlement as the driver passes it on: everyone's share and route, and the account for 바로 정산.
+create or replace function public._trip_card(t public.trips) returns jsonb
+language plpgsql stable set search_path = public, extensions as $$
+declare
+  s public.settlements;
+  d public.drivers := public._owner(t.driver_id, t.vehicle_id);
+begin
+  select * into s from public.settlements where trip_id = t.id;
+  return jsonb_build_object(
+    'kind', 'trip', 'code', t.code, 'title', t.title, 'date', coalesce(t.ended_at, t.created_at),
+    'settle_mode', t.settle_mode,
+    'folder', (select f.name from public.folder_batches b join public.folders f on f.id = b.folder_id
+               where b.id = t.batch_id),
+    'total', (s.payload ->> 'total')::numeric,
+    'people', (select coalesce(jsonb_agg(jsonb_build_object(
+                 'name', x ->> 'name', 'amount', (x ->> 'amount')::numeric, 'from', x ->> 'from', 'to', x ->> 'to',
+                 'paid', p.paid_at is not null) order by ord), '[]'::jsonb)
+               from jsonb_array_elements(s.payload -> 'shares') with ordinality as y(x, ord)
+               left join public.trip_passengers p on p.id::text = x ->> 'passenger_id'
+               where x ->> 'role' is distinct from 'driver'),
+    'bank', case when t.settle_mode = 'direct' then public._bank_of(d) end);
+end $$;
+
+-- A requested folder batch: each person's sum, every trip in it with its shares and routes, the account.
+create or replace function public._batch_card(b public.folder_batches) returns jsonb
+language plpgsql stable set search_path = public, extensions as $$
+declare
+  f public.folders;
+  d public.drivers;
+begin
+  select * into f from public.folders where id = b.folder_id;
+  d := public._owner(f.driver_id, f.vehicle_id);
+  return jsonb_build_object(
+    'kind', 'batch', 'code', b.code, 'title', f.name, 'date', b.requested_at,
+    'total', (select coalesce(sum(amount), 0) from public.batch_payments where batch_id = b.id),
+    'people', (select coalesce(jsonb_agg(jsonb_build_object('name', name, 'amount', amount, 'trips', trips,
+                 'paid', paid_at is not null) order by name), '[]'::jsonb)
+               from public.batch_payments where batch_id = b.id),
+    'rides', (select coalesce(jsonb_agg(jsonb_build_object(
+                'title', t.title, 'date', coalesce(t.ended_at, t.created_at),
+                'shares', (select coalesce(jsonb_agg(jsonb_build_object('name', x ->> 'name',
+                             'amount', (x ->> 'amount')::numeric, 'from', x ->> 'from', 'to', x ->> 'to')
+                             order by ord), '[]'::jsonb)
+                           from jsonb_array_elements(st.payload -> 'shares') with ordinality as y(x, ord)
+                           where x ->> 'role' is distinct from 'driver'))
+                order by coalesce(t.ended_at, t.created_at) desc), '[]'::jsonb)
+              from public.trips t join public.settlements st on st.trip_id = t.id where t.batch_id = b.id),
+    'bank', public._bank_of(d));
+end $$;
+
+-- What "내 휴대폰으로 보내기" put on the driver's phone, for the link that was opened: that trip and the
+-- folder batch it belongs to. A card goes away once everyone in it has paid.
+create or replace function public._driver_view(d public.drivers, p_trip uuid, p_batch uuid) returns jsonb
+language plpgsql stable set search_path = public, extensions as $$
+declare
+  t public.trips;
+  b public.folder_batches;
+  cards jsonb := '[]'::jsonb;
+begin
+  select * into t from public.trips where id = p_trip;
+  if t.id is not null and t.status = 'settled' and exists (select 1 from public.share_requests where trip_id = t.id)
+     and ((t.settle_mode = 'direct' and exists (select 1 from public.trip_passengers where trip_id = t.id and paid_at is null))
+          or (t.settle_mode = 'folder' and (select status from public.folder_batches where id = t.batch_id) = 'open')) then
+    cards := cards || jsonb_build_array(public._trip_card(t));
+  end if;
+  select * into b from public.folder_batches where id = p_batch;
+  if b.id is not null and b.status = 'requested' and exists (select 1 from public.share_requests where batch_id = b.id) then
+    cards := cards || jsonb_build_array(public._batch_card(b));
+  end if;
+  return jsonb_build_object('driver_name', d.display_name, 'cards', cards);
+end $$;
+
+-- "내 휴대폰으로 보내기" on the arrival screen (L6). A trip stacked into a folder whose batch is already
+-- requested passes on the batch instead.
+create or replace function public.queue_trip_share(p_code text, p_admin_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare t public.trips := public._trip_admin(p_code, p_admin_secret);
+begin
+  if t.status <> 'settled' then raise exception 'not_settled'; end if;
+  if t.settle_mode is null then raise exception 'not_chosen'; end if;
+  if t.settle_mode = 'folder' and (select status from public.folder_batches where id = t.batch_id) = 'requested' then
+    delete from public.share_requests where batch_id = t.batch_id;
+    insert into public.share_requests (batch_id) values (t.batch_id);
+    return jsonb_build_object('kind', 'batch');
+  end if;
+  delete from public.share_requests where trip_id = t.id;
+  insert into public.share_requests (trip_id) values (t.id);
+  return jsonb_build_object('kind', 'trip');
+end $$;
+
+-- The same from the folder screen while its batch is being settled (L1-7).
+create or replace function public.queue_batch_share(p_folder_code text, p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  f public.folders := public._folder_admin(p_folder_code, p_secret);
+  r uuid;
+begin
+  select id into r from public.folder_batches where folder_id = f.id and status = 'requested'
+  order by created_at desc limit 1;
+  if r is null then raise exception 'no_request'; end if;
+  delete from public.share_requests where batch_id = r;
+  insert into public.share_requests (batch_id) values (r);
+  return jsonb_build_object('kind', 'batch');
 end $$;
 
 -- ---------------------------------------------------------------- regular carpools
@@ -1376,6 +1575,12 @@ begin
         account_holder = old.account_holder, bank_consent_at = old.bank_consent_at
       where id = d.id;
     end if;
+    -- the name and digits entered on the car (L1-9) come along when this driver has none yet
+    if d.phone4_hash is null and old.phone4_hash is not null then
+      update public.drivers set display_name = old.display_name, phone4_salt = old.phone4_salt,
+        phone4_hash = old.phone4_hash
+      where id = d.id;
+    end if;
     update public.trips set driver_id = d.id where driver_id = old.id;
     update public.folders set driver_id = d.id where driver_id = old.id;
     update public.carpools set driver_id = d.id where driver_id = old.id;
@@ -1442,7 +1647,8 @@ declare
   api text[] := array[
     'create_driver', 'update_driver', 'get_driver',
     'create_trip', 'get_trip', 'join_trip', 'verify_device', 'report_issue', 'remove_passenger', 'remove_passenger_place', 'delete_ride_record',
-    'get_bank_account', 'set_bank_account',
+    'get_bank_account', 'set_bank_account', 'get_driver_info', 'set_driver_info',
+    'queue_trip_share', 'queue_batch_share',
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
     'get_trip_admin', 'set_trip_status', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',

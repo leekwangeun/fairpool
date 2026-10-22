@@ -207,7 +207,7 @@ export default function DriverTrip() {
               </Card>
             )
           )}
-          {demoMode && trip.status !== 'settled' && <DemoTools trip={trip} secret={secret} run={run} />}
+          {demoMode && <DemoTools trip={trip} secret={secret} run={run} />}
           {trip.status === 'preparing' && (
             <Button variant="danger" onClick={cancel}>
               운행 취소
@@ -380,7 +380,9 @@ function SettleSection({ trip, secret, run }: { trip: AdminTrip; secret: string;
 
 // Demo mode only: stand in for the car, which normally sends progress, boarding and the settlement.
 function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run: (fn: () => Promise<unknown>) => void }) {
+  const [note, setNote] = useState('');
   const ps = trip.passengers;
+  const settled = trip.status === 'settled';
   const hhmm = (d: Date) => d.toTimeString().slice(0, 5);
   const allBoarded = ps.length > 0 && ps.every((p) => p.boarded_at);
 
@@ -439,37 +441,57 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
     });
   }
 
-  // the account is entered only on the car (L1-9): link a stand-in car to this driver and save a sample
-  async function addBankFromCar() {
+  // 운전자 정보 입력 is only on the car (L1-9): link a stand-in car to this driver and save a sample name,
+  // last 4 digits and account
+  async function addDriverInfoFromCar() {
     const car = await rpc<{ vehicle_secret: string; link_code: string }>('create_vehicle_link', {});
     await rpc('claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: store.driverSecret() });
+    const me = await rpc<{ display_name: string }>('get_driver', { p_driver_secret: store.driverSecret() });
+    await rpc('set_driver_info', { p_vehicle_secret: car.vehicle_secret, p_name: me.display_name, p_phone4: '1234' });
     await rpc('set_bank_account', {
       p_vehicle_secret: car.vehicle_secret,
       p_consent: true,
       p_bank_name: '카카오뱅크',
       p_bank_account: '3333-01-2345678',
-      p_account_holder: '운전자',
+      p_account_holder: me.display_name,
     });
+    setNote(`운전자 이름 ${me.display_name}, 번호 뒤 4자리 1234로 넣었어요`);
+  }
+
+  // the arrival screen's "내 휴대폰으로 보내기"
+  async function sendToMyPhone() {
+    await rpc('queue_trip_share', { p_code: trip.code, p_admin_secret: secret });
+    setNote('다른 휴대폰(또는 시크릿 창)에서 이 운행 링크를 열고 운전자 이름과 번호 뒤 4자리로 확인하면 보여요');
   }
 
   return (
     <Card className="gap-2.5">
       <h2 className="t-strong">시연 도구</h2>
       <p className="t-caption text-sub">실제로는 차가 보내는 값이에요. 데모 모드에서만 보여요.</p>
-      <Button variant="secondary" onClick={() => sendProgress(false)} disabled={ps.length === 0}>
-        태우러 가는 중 보내기
-      </Button>
-      <Button variant="secondary" onClick={() => sendProgress(true)} disabled={ps.length === 0 || allBoarded}>
-        모두 탑승, 함께 가는 중 보내기
-      </Button>
-      <Button variant="secondary" onClick={settle} disabled={ps.length === 0}>
-        정산 결과 보내기
-      </Button>
-      {store.driverSecret() && (
-        <Button variant="secondary" onClick={() => run(addBankFromCar)}>
-          차 화면에서 받을 계좌 넣기
+      {!settled && (
+        <>
+          <Button variant="secondary" onClick={() => sendProgress(false)} disabled={ps.length === 0}>
+            태우러 가는 중 보내기
+          </Button>
+          <Button variant="secondary" onClick={() => sendProgress(true)} disabled={ps.length === 0 || allBoarded}>
+            모두 탑승, 함께 가는 중 보내기
+          </Button>
+          <Button variant="secondary" onClick={settle} disabled={ps.length === 0}>
+            정산 결과 보내기
+          </Button>
+        </>
+      )}
+      {settled && trip.settle_mode && (
+        <Button variant="secondary" onClick={() => run(sendToMyPhone)}>
+          차에서 '내 휴대폰으로 보내기' 누르기
         </Button>
       )}
+      {store.driverSecret() && (
+        <Button variant="secondary" onClick={() => run(addDriverInfoFromCar)}>
+          차 화면에서 운전자 정보 넣기
+        </Button>
+      )}
+      {note && <p className="t-caption text-sub">{note}</p>}
     </Card>
   );
 }

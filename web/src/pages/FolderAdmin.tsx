@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { rpc, type BatchSummary, type FolderAdmin as Folder } from '../api';
+import { demoMode, rpc, type BatchSummary, type FolderAdmin as Folder } from '../api';
 import { settleLink, store } from '../store';
 import { BatchPill, Button, Card, Checkbox, ErrorText, Page, QrImage, copyText, dayLabel, usePolling, won } from '../ui';
 
@@ -199,6 +199,20 @@ export default function FolderAdmin() {
           </>
         )}
       </div>
+      {demoMode && req && (
+        // demo only: the L1-7 car screen's "내 휴대폰으로 보내기"
+        <Button
+          variant="secondary"
+          onClick={() =>
+            run(async () => {
+              await rpc('queue_batch_share', args);
+              return rpc<Folder>('get_folder_admin', args);
+            })
+          }
+        >
+          시연: 차에서 '내 휴대폰으로 보내기' 누르기
+        </Button>
+      )}
 
       <TripList batch={batch} />
 

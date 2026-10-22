@@ -538,3 +538,86 @@ test('stops are cleared a day after the trip ends', async () => {
   const admin = await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret });
   assert.equal(admin.passengers[0].dropoff, null);
 });
+
+test('driver info from the car opens a read-only "내 휴대폰으로 보내기" view of each settlement', async () => {
+  const db = await freshDb();
+  // 운전자 정보 입력 on the car before any driver links it: name, last 4 digits, account
+  const car = await rpc(db, 'create_vehicle_link', {});
+  await assert.rejects(rpc(db, 'set_driver_info', { p_vehicle_secret: car.vehicle_secret, p_name: '지훈' }), /phone4_required/);
+  await assert.rejects(rpc(db, 'set_driver_info', { p_vehicle_secret: car.vehicle_secret, p_name: '지훈', p_phone4: '12' }),
+                       /bad_phone4/);
+  let info = await rpc(db, 'set_driver_info', { p_vehicle_secret: car.vehicle_secret, p_name: '지훈', p_phone4: '7890' });
+  assert.deepEqual([info.name, info.phone4_set, info.bank], ['지훈', true, null]);
+  await rpc(db, 'set_bank_account', { p_vehicle_secret: car.vehicle_secret, p_consent: true, p_bank_name: '페어은행',
+                                      p_bank_account: '1002-123-7890', p_account_holder: '지훈' });
+  const stored = (await db.query('select phone4_hash from public.drivers where phone4_hash is not null')).rows[0];
+  assert.notEqual(stored.phone4_hash, '7890');
+  // linking the car brings the name and digits along
+  const { driver_secret } = await rpc(db, 'create_driver', {});
+  await rpc(db, 'claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: driver_secret });
+  info = await rpc(db, 'get_driver_info', { p_vehicle_secret: car.vehicle_secret });
+  assert.deepEqual([info.name, info.phone4_set, info.bank.account], ['지훈', true, '1002-123-7890']);
+
+  // 바로 정산 trip
+  const trip = await rpc(db, 'create_trip', { p_title: 'MT 귀갓길', p_vehicle_secret: car.vehicle_secret });
+  await rpc(db, 'join_trip', { p_code: trip.code, p_device_key: device(1), p_name: '민지', p_phone4: '1111' });
+  await rpc(db, 'join_trip', { p_code: trip.code, p_device_key: device(2), p_name: '서연', p_phone4: '2222' });
+  const ps = (await rpc(db, 'get_trip_admin', { p_code: trip.code, p_admin_secret: car.vehicle_secret })).passengers;
+  await rpc(db, 'post_settlement', { p_code: trip.code, p_admin_secret: trip.admin_secret, p_payload: {
+    total: 15730, shares: [{ passenger_id: ps[0].id, name: '민지', amount: 3990, from: '창천동', to: '연희동' },
+                           { passenger_id: ps[1].id, name: '서연', amount: 4700, from: '창천동', to: '망원동' },
+                           { passenger_id: null, name: '지훈', role: 'driver', amount: 7040 }] } });
+  await assert.rejects(rpc(db, 'queue_trip_share', { p_code: trip.code, p_admin_secret: car.vehicle_secret }), /not_chosen/);
+  await rpc(db, 'choose_settlement', { p_code: trip.code, p_admin_secret: car.vehicle_secret, p_mode: 'direct' });
+
+  const asDriver = (code, phone4 = '7890') =>
+    rpc(db, 'verify_device', { p_code: code, p_device_key: device(9), p_name: '지훈', p_phone4: phone4 });
+  let res = await asDriver(trip.code);
+  assert.deepEqual(res.driver_view.cards, [], 'nothing until the car sends it');
+  assert.equal((await asDriver(trip.code, '0000')).error, 'verify_failed');
+
+  assert.equal((await rpc(db, 'queue_trip_share', { p_code: trip.code, p_admin_secret: car.vehicle_secret })).kind, 'trip');
+  res = await asDriver(trip.code);
+  const card = res.driver_view.cards[0];
+  assert.equal(res.driver_view.driver_name, '지훈');
+  assert.deepEqual([card.kind, card.code, card.total, card.bank.account], ['trip', trip.code, 15730, '1002-123-7890']);
+  assert.deepEqual(card.people.map((p) => [p.name, p.amount, p.to, p.paid]),
+                   [['민지', 3990, '연희동', false], ['서연', 4700, '망원동', false]]);
+  // read-only: the phone is not bound to anyone and the driver secret never leaves the car
+  assert.equal((await rpc(db, 'get_trip', { p_code: trip.code, p_device_key: device(9) })).me, null);
+  assert.ok(!JSON.stringify(res).includes(trip.admin_secret));
+
+  for (const p of ps) await rpc(db, 'mark_paid', { p_code: trip.code, p_admin_secret: car.vehicle_secret, p_passenger_id: p.id });
+  assert.deepEqual((await asDriver(trip.code)).driver_view.cards, [], 'the card goes once everyone has paid');
+
+  // 카풀 폴더: a stacking trip shows its own shares, a requested batch shows every person and trip
+  const t2 = await rpc(db, 'create_trip', { p_title: '출근', p_vehicle_secret: car.vehicle_secret });
+  await rpc(db, 'join_trip', { p_code: t2.code, p_device_key: device(1), p_name: '민지', p_phone4: '1111' });
+  const p2 = (await rpc(db, 'get_trip_admin', { p_code: t2.code, p_admin_secret: t2.admin_secret })).passengers[0];
+  await rpc(db, 'post_settlement', { p_code: t2.code, p_admin_secret: t2.admin_secret, p_payload: {
+    total: 6000, shares: [{ passenger_id: p2.id, name: '민지', amount: 2430, from: '신촌', to: '회사' },
+                          { passenger_id: null, name: '지훈', role: 'driver', amount: 3570 }] } });
+  const folder = (await rpc(db, 'choose_settlement', { p_code: t2.code, p_admin_secret: t2.admin_secret, p_mode: 'folder',
+                                                         p_new_folder: '출근 카풀' })).folder;
+  await rpc(db, 'queue_trip_share', { p_code: t2.code, p_admin_secret: t2.admin_secret });
+  let c = (await asDriver(t2.code)).driver_view.cards;
+  assert.deepEqual([c.length, c[0].settle_mode, c[0].folder, c[0].bank], [1, 'folder', '출근 카풀', null],
+                   'still stacking: no account yet');
+
+  await assert.rejects(rpc(db, 'queue_batch_share', { p_folder_code: folder.code, p_secret: car.vehicle_secret }), /no_request/);
+  const req = (await rpc(db, 'request_batch', { p_folder_code: folder.code, p_secret: car.vehicle_secret })).requested;
+  await rpc(db, 'queue_batch_share', { p_folder_code: folder.code, p_secret: car.vehicle_secret });
+  res = await rpc(db, 'verify_settle_page', { p_code: req.code, p_device_key: device(9), p_name: '지훈', p_phone4: '7890' });
+  c = res.driver_view.cards;
+  assert.deepEqual([c.length, c[0].kind, c[0].code, c[0].total, c[0].bank.account], [1, 'batch', req.code, 2430, '1002-123-7890']);
+  assert.deepEqual(c[0].rides[0].shares, [{ name: '민지', amount: 2430, from: '신촌', to: '회사' }]);
+  // the trip link of that batch shows it too
+  c = (await asDriver(t2.code)).driver_view.cards;
+  assert.deepEqual(c.map((x) => x.kind), ['batch']);
+  assert.equal((await rpc(db, 'get_settle_page', { p_code: req.code, p_device_key: device(9) })).me, null);
+
+  await rpc(db, 'cancel_batch_request', { p_folder_code: folder.code, p_secret: car.vehicle_secret });
+  const again = (await rpc(db, 'request_batch', { p_folder_code: folder.code, p_secret: car.vehicle_secret })).requested;
+  res = await rpc(db, 'verify_settle_page', { p_code: again.code, p_device_key: device(9), p_name: '지훈', p_phone4: '7890' });
+  assert.deepEqual(res.driver_view.cards, [], 'a cancelled request has to be sent again');
+});

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { rpc, type SettlePage as Settle } from '../api';
+import { rpc, type DriverView, type SettlePage as Settle } from '../api';
 import { store } from '../store';
+import DriverSend from './DriverSend';
 import {
   Amount,
   AmountRow,
@@ -28,6 +29,7 @@ export default function SettlePage() {
   const deviceKey = store.deviceKey();
   const [page, setPage] = useState<Settle | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [driverView, setDriverView] = useState<DriverView | null>(null);
 
   async function load() {
     try {
@@ -48,7 +50,8 @@ export default function SettlePage() {
     );
   }
   if (!page) return <Page>{null}</Page>;
-  if (!page.me) return <Verify page={page} deviceKey={deviceKey} onDone={setPage} />;
+  if (driverView) return <DriverSend view={driverView} />;
+  if (!page.me) return <Verify page={page} deviceKey={deviceKey} onDone={setPage} onDriver={setDriverView} />;
 
   const me = page.me;
   const done = page.status === 'done' || me.paid;
@@ -108,7 +111,18 @@ export default function SettlePage() {
 }
 
 // Opened on a phone that did not ride: the same QR works for everyone after name + last 4 digits.
-function Verify({ page, deviceKey, onDone }: { page: Settle; deviceKey: string; onDone: (p: Settle) => void }) {
+// The driver's own name and digits (saved on the car) open the read-only "내 휴대폰으로 보내기" view.
+function Verify({
+  page,
+  deviceKey,
+  onDone,
+  onDriver,
+}: {
+  page: Settle;
+  deviceKey: string;
+  onDone: (p: Settle) => void;
+  onDriver: (v: DriverView) => void;
+}) {
   const [name, setName] = useState(store.myName());
   const [phone4, setPhone4] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +130,14 @@ function Verify({ page, deviceKey, onDone }: { page: Settle; deviceKey: string; 
   async function verify() {
     setError(null);
     try {
-      onDone(await rpc<Settle>('verify_settle_page', { p_code: page.code, p_device_key: deviceKey, p_name: name, p_phone4: phone4 }));
+      const res = await rpc<Settle | { driver_view: DriverView }>('verify_settle_page', {
+        p_code: page.code,
+        p_device_key: deviceKey,
+        p_name: name,
+        p_phone4: phone4,
+      });
+      if ('driver_view' in res) return onDriver(res.driver_view);
+      onDone(res);
       store.setMyName(name.trim());
     } catch (e) {
       setError((e as Error).message);
@@ -132,6 +153,7 @@ function Verify({ page, deviceKey, onDone }: { page: Settle; deviceKey: string; 
           <p className="t-body text-sub">
             {page.driver_name}님이 보낸 페이지예요. 이름과 휴대폰 번호 뒤 4자리로 확인하면 내 내역과 분담액만 보여요
           </p>
+          <p className="t-caption text-faint">{page.driver_name}님이라면 차 화면에 넣은 이름과 번호 뒤 4자리로 보낼 정산을 볼 수 있어요</p>
         </div>
         <Field label="이름">
           <TextInput value={name} onChange={setName} />
