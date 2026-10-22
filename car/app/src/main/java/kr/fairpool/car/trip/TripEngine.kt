@@ -56,7 +56,8 @@ data class Passenger(
 data class Stop(val kind: String, val passengerId: String?, val name: String, val place: Place, val done: Boolean = false)
 
 /** A recorded boarding or alighting, in order, with the odometer reading. */
-data class TripEvent(val passengerId: String, val boarding: Boolean, val km: Double, val place: Place, val time: Long)
+data class TripEvent(val passengerId: String, val boarding: Boolean, val km: Double, val place: Place, val time: Long,
+                     val fix: Pair<Double, Double>? = null)
 
 /** The confirmation card on L5 (정차 중 하차 확인). */
 data class PendingCard(val passengerId: String, val name: String, val boarding: Boolean, val at: Long)
@@ -80,6 +81,7 @@ data class TripState(
     val startOdometerKm: Double? = null,
     val efficiencyKmL: Double? = null,
     val toll: Long = 0,
+    val fix: Pair<Double, Double>? = null,
     val seatOccupied: Map<SeatSlot, Boolean> = emptyMap(),
     val doorOpen: Map<SeatSlot, Boolean> = emptyMap(),
     val card: PendingCard? = null,
@@ -110,6 +112,8 @@ object TripEngine {
     var rpc: Rpc? = null
     var navi: NaviBridge? = null
     var fuelPrice: Int = 1700
+    var defaultEfficiency: Double = 11.0
+    var driverName: String = "운전자"
 
     private val time = SimpleDateFormat("HH:mm:ss", Locale.KOREA)
 
@@ -157,9 +161,31 @@ object TripEngine {
                     boardKm = old?.boardKm, alightKm = old?.alightKm, boardPlace = old?.boardPlace, alightPlace = old?.alightPlace
                 )
             }
-            s.copy(passengers = merged, plan = if (s.phase == Phase.DRIVING) s.plan else planStops(s.origin, s.destination, merged))
+            val plan = when {
+                s.phase == Phase.DRIVING -> s.plan
+                else -> serverPlan(trip, s.destination) ?: planStops(s.origin, s.destination, merged)
+            }
+            s.copy(passengers = merged, plan = plan)
         }
     }
+
+    /** The visiting order the server worked out (get_trip_admin.waypoints), when it sent one. */
+    private fun serverPlan(trip: JSONObject, destination: Place?): List<Stop>? {
+        val wps = trip.optJSONArray("waypoints") ?: return null
+        if (wps.length() == 0) return null
+        val stops = (0 until wps.length()).mapNotNull { i ->
+            val w = wps.getJSONObject(i)
+            val place = Place.from(w) ?: return@mapNotNull null
+            when (val kind = w.optString("kind")) {
+                "pickup", "dropoff" -> Stop(kind, w.optString("passenger_id"), w.optString("name"), place)
+                else -> null
+            }
+        }
+        return stops + listOfNotNull(destination?.let { Stop("end", null, "도착", it) })
+    }
+
+    /** L6: the driver corrects the toll (the navi only quotes the route still ahead). */
+    fun setToll(won: Long) = _state.update { it.copy(toll = won.coerceAtLeast(0)) }
 
     /**
      * Visiting order: passengers boarding at the start get in first, then pickups and drop-offs are
@@ -211,6 +237,20 @@ object TripEngine {
         val atStart = s.passengers.filter { it.pickup == null || (s.origin?.distanceKm(it.pickup) ?: 99.0) <= 0.3 }
         val freeSeats = SeatSlot.entries.filter { slot -> s.seatOccupied[slot] == true && s.passengers.none { it.seat == slot } }
         atStart.filter { it.seat == null }.zip(freeSeats).forEach { (p, slot) -> assignSeat(p.id, slot) }
+    }
+
+    /** L3 seat tap: [passengerId] takes [slot]; whoever sat there moves to the seat they left. */
+    fun swapSeat(passengerId: String, slot: SeatSlot) {
+        _state.update { s ->
+            val old = s.passengers.firstOrNull { it.id == passengerId }?.seat
+            s.copy(passengers = s.passengers.map {
+                when {
+                    it.id == passengerId -> it.copy(seat = slot)
+                    it.seat == slot && !it.alighted -> it.copy(seat = old)
+                    else -> it
+                }
+            })
+        }
     }
 
     fun assignSeat(passengerId: String, slot: SeatSlot?) {
@@ -302,6 +342,16 @@ object TripEngine {
         if (kmL > 1) _state.update { it.copy(efficiencyKmL = kmL) }
     }
 
+    private var fixLogged = false
+
+    fun onLocation(lat: Double, lng: Double) {
+        _state.update { it.copy(fix = lat to lng) }
+        if (!fixLogged) {
+            fixLogged = true
+            log("위치 수신: %.5f, %.5f".format(lat, lng))
+        }
+    }
+
     fun onToll(won: Long) {
         // every re-route quotes the toll still ahead; the largest quote covers the tolled stretch
         if (won > 0) _state.update { it.copy(toll = maxOf(it.toll, won)) }
@@ -346,12 +396,12 @@ object TripEngine {
         _state.update { st ->
             st.copy(
                 passengers = st.passengers.map { if (it.id == passengerId) it.copy(boarded = true, alighted = false, seat = slot ?: it.seat, boardKm = km, boardPlace = place) else it },
-                events = st.events + TripEvent(passengerId, true, km, place, System.currentTimeMillis()),
+                events = st.events + TripEvent(passengerId, true, km, place, System.currentTimeMillis(), st.fix),
                 plan = st.plan.map { if (it.kind == "pickup" && it.passengerId == passengerId) it.copy(done = true) else it },
                 card = PendingCard(passengerId, p.name, true, System.currentTimeMillis())
             )
         }
-        log("${p.name} 탑승 (${slot?.label ?: "좌석 미지정"})")
+        log("${p.name} 탑승 (${slot?.label ?: "좌석 미지정"})" + (s.fix?.let { " 위치 %.5f, %.5f".format(it.first, it.second) } ?: ""))
         scope.launch {
             call("mark_passenger", args("p_code" to s.code, "p_admin_secret" to s.adminSecret, "p_passenger_id" to passengerId,
                 "p_seat" to (slot ?: p.seat)?.code, "p_boarded" to true, "p_unchecked" to unchecked))
@@ -368,12 +418,12 @@ object TripEngine {
         _state.update { st ->
             st.copy(
                 passengers = st.passengers.map { if (it.id == passengerId) it.copy(alighted = true, alightKm = km, alightPlace = place) else it },
-                events = st.events + TripEvent(passengerId, false, km, place, System.currentTimeMillis()),
+                events = st.events + TripEvent(passengerId, false, km, place, System.currentTimeMillis(), st.fix),
                 plan = st.plan.map { if (it.passengerId == passengerId) it.copy(done = true) else it },
                 card = PendingCard(passengerId, p.name, false, System.currentTimeMillis())
             )
         }
-        log("${p.name} 하차 기록")
+        log("${p.name} 하차 기록" + (s.fix?.let { " 위치 %.5f, %.5f".format(it.first, it.second) } ?: ""))
         scope.launch {
             call("mark_passenger", args("p_code" to s.code, "p_admin_secret" to s.adminSecret, "p_passenger_id" to passengerId,
                 "p_alighted" to true, "p_unchecked" to unchecked))
@@ -464,7 +514,7 @@ object TripEngine {
         val s = _state.value
         val origin = s.origin ?: return@withContext null
         val dest = s.destination ?: origin
-        val riders = listOf(Rider(null, "운전자", true)) + s.passengers.filter { it.boarded }.map { Rider(it.id, it.name, false) }
+        val riders = listOf(Rider(null, driverName, true)) + s.passengers.filter { it.boarded }.map { Rider(it.id, it.name, false) }
         val people = s.passengers.filter { it.boarded }
         val n = riders.size
 
@@ -477,7 +527,7 @@ object TripEngine {
         }
         seq += Pt(0, dest)
 
-        val efficiency = s.efficiencyKmL ?: 12.0
+        val efficiency = s.efficiencyKmL ?: defaultEfficiency
         val fuelPerKm = fuelPrice / efficiency
         val tollPayers = buildSet {
             add(0)
@@ -551,7 +601,7 @@ object TripEngine {
         val rule = when (a.method) { "shapley" -> "shapley"; "equal" -> "equal"; else -> "segment_split" }
         return JSONObject().put("rule", rule)
             .put("include_driver", s.includeDriver).put("total", a.total).put("toll", a.toll)
-            .put("fuel", JSONObject().put("distance_km", round1(s.settlementKm)).put("efficiency_km_l", round1(s.efficiencyKmL ?: 12.0))
+            .put("fuel", JSONObject().put("distance_km", round1(s.settlementKm)).put("efficiency_km_l", round1(s.efficiencyKmL ?: defaultEfficiency))
                 .put("amount", a.fuelAmount))
             .put("shares", shares)
     }

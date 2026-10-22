@@ -50,11 +50,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kr.fairpool.car.data.Config
@@ -68,6 +72,7 @@ import kr.fairpool.car.trip.Phase
 import kr.fairpool.car.trip.SeatSlot
 import kr.fairpool.car.trip.TripEngine
 import kr.fairpool.car.trip.TripService
+import kr.fairpool.car.trip.Voice
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -98,7 +103,12 @@ class MainActivity : ComponentActivity() {
         rpc = Rpc(config)
         TripEngine.rpc = rpc
         TripEngine.fuelPrice = config.fuelPrice
+        TripEngine.defaultEfficiency = config.efficiency.toDouble()
         TripService.start(this)
+        // speech answers on the L5 card and Pleos fused location (both dangerous permissions)
+        val wanted = arrayOf(android.Manifest.permission.RECORD_AUDIO, "pleos.car.permission.FUSED_LOCATION")
+            .filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
+        if (wanted.isNotEmpty()) requestPermissions(wanted.toTypedArray(), 1)
         setContent {
             // the Pleos display reports mdpi for a 2560x1440 panel; scale up so text reads at driving distance
             val base = LocalDensity.current
@@ -196,9 +206,12 @@ private fun Qr(content: String, sizeDp: Int) {
 }
 
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, hidden: Boolean = false) {
+private fun Field(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, hidden: Boolean = false,
+                  onDone: (() -> Unit)? = null) {
     OutlinedTextField(value, onChange, label = { Text(label, fontSize = 16.sp) }, singleLine = true,
         visualTransformation = if (hidden) PasswordVisualTransformation() else VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(imeAction = if (onDone != null) ImeAction.Done else ImeAction.Default),
+        keyboardActions = KeyboardActions(onDone = { onDone?.invoke() }),
         textStyle = androidx.compose.ui.text.TextStyle(fontSize = 20.sp), modifier = modifier.fillMaxWidth())
 }
 
@@ -327,6 +340,7 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
     var key by remember { mutableStateOf(config.anonKey) }
     var demo by remember { mutableStateOf(config.demo) }
     var price by remember { mutableStateOf(config.fuelPrice.toString()) }
+    var efficiency by remember { mutableStateOf(config.efficiency.toString()) }
     var secret by remember { mutableStateOf(config.vehicleSecret ?: "") }
     Column(Modifier.fillMaxSize()) {
         Header("설정", Sub)
@@ -338,6 +352,8 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
             Field("QR 사이트 주소", site, { site = it })
             Spacer(Modifier.height(12.dp))
             Field("휘발유 단가 (원/L)", price, { price = it.filter(Char::isDigit) })
+            Spacer(Modifier.height(12.dp))
+            Field("기본 연비 (km/L, 차가 연비를 알려 주지 않을 때)", efficiency, { efficiency = it.filter { c -> c.isDigit() || c == '.' } })
             Spacer(Modifier.height(12.dp))
             Field("차 비밀값 (이미 등록한 차를 쓸 때)", secret, { secret = it.trim() }, hidden = true)
             Spacer(Modifier.height(16.dp))
@@ -356,6 +372,8 @@ private fun SettingsScreen(config: Config, onBack: () -> Unit) {
             config.fuelPrice = price.toIntOrNull() ?: 1700
             config.vehicleSecret = secret.ifEmpty { null }
             TripEngine.fuelPrice = config.fuelPrice
+            config.efficiency = efficiency.toFloatOrNull() ?: 11f
+            TripEngine.defaultEfficiency = config.efficiency.toDouble()
             onBack()
         }
     }
@@ -459,9 +477,34 @@ private fun HomeScreen(
     var consent by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var carpools by remember { mutableStateOf(JSONArray()) }
+    var prepared by remember { mutableStateOf(JSONArray()) }
     val secret = config.vehicleSecret
     LaunchedEffect(Unit) {
-        runCatching { carpools = rpc.call("get_vehicle_trips", args("p_vehicle_secret" to secret)).optJSONArray("carpools") ?: JSONArray() }
+        runCatching {
+            val v = rpc.call("get_vehicle_trips", args("p_vehicle_secret" to secret))
+            carpools = v.optJSONArray("carpools") ?: JSONArray()
+            prepared = v.optJSONArray("trips") ?: JSONArray()
+        }
+        runCatching {
+            rpc.call("get_driver_info", args("p_vehicle_secret" to secret)).optString("name")
+                .takeIf { it.isNotBlank() }?.let { TripEngine.driverName = it }
+        }
+    }
+    /** A trip made earlier (on the phone or in the car) and still preparing: pick it up with the car secret. */
+    fun resume(code: String) {
+        scope.launch {
+            try {
+                val t = rpc.call("get_trip_admin", args("p_code" to code, "p_admin_secret" to secret))
+                val origin = Place.from(t.optJSONObject("origin")) ?: DemoPlaces.school
+                val destination = Place.from(t.optJSONObject("destination")) ?: DemoPlaces.eungam
+                TripEngine.startInvite(code, secret ?: "", t.optString("title"), origin, destination, t.optInt("seats", 3),
+                    t.optBoolean("include_driver", true), t.optString("rule", "shapley"))
+                TripEngine.applyTripAdmin(t)
+                onStart()
+            } catch (e: Exception) {
+                onMessage("운행을 불러오지 못했어요: ${e.message}")
+            }
+        }
     }
     Column(Modifier.fillMaxSize()) {
         Header("주차 중${if (config.demo) " · 데모" else ""}", Green, onSettings)
@@ -509,6 +552,24 @@ private fun HomeScreen(
                 }
             }
             Column(Modifier.weight(0.9f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (prepared.length() > 0) {
+                    Card(Modifier.fillMaxWidth(), 22) {
+                        Text("준비 중인 운행", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Ink)
+                        Spacer(Modifier.height(8.dp))
+                        for (i in 0 until minOf(2, prepared.length())) {
+                            val t = prepared.getJSONObject(i)
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(BlueSoft)
+                                .clickable { resume(t.optString("code")) }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(t.optString("title"), fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                                    Body("${t.optInt("passengers")}명 참여 · 이어서 진행", Blue, 15)
+                                }
+                                Text("›", fontSize = 30.sp, color = Blue)
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                }
                 Card(Modifier.fillMaxWidth(), 22) {
                     Text("지난 운행 다시 만들기", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Ink)
                     Spacer(Modifier.height(8.dp))
@@ -723,12 +784,12 @@ private fun RowScope.SeatCell(slot: SeatSlot) {
     val who = trip.passengers.firstOrNull { it.seat == slot && !it.alighted }
     val occupied = trip.seatOccupied[slot] == true
     SeatBox(who?.name ?: slot.label, occupied, who != null) {
-        // tap: give this seat to the next passenger without one (or clear it)
-        val candidates = trip.passengers.filter { !it.alighted && (it.seat == null || it.seat == slot) }
-        val idx = candidates.indexOfFirst { it.seat == slot }
-        val next = candidates.getOrNull(idx + 1)
-        if (who != null) TripEngine.assignSeat(who.id, null)
-        if (next != null && next.id != who?.id) TripEngine.assignSeat(next.id, slot)
+        // tap: the next person in the list takes this seat, swapping with whoever had it
+        val order = trip.passengers.filter { !it.alighted }
+        if (order.isNotEmpty()) {
+            val next = order[(order.indexOfFirst { it.seat == slot } + 1) % order.size]
+            TripEngine.swapSeat(next.id, slot)
+        }
     }
 }
 
@@ -751,7 +812,17 @@ private fun DrivingScreen(onArrive: () -> Unit) {
     val trip by TripEngine.state.collectAsState()
     val parked = trip.gear.contains("PARK", ignoreCase = true) || trip.gear == "P"
     LaunchedEffect(trip.card) {
-        if (trip.card != null) { delay(9000); TripEngine.dismissCard() }
+        val card = trip.card ?: return@LaunchedEffect
+        // read the card once, then listen for "맞아" / "잘못 인식" while it is up (the car is stopped)
+        Voice.say("${card.name} 님 ${if (card.boarding) "탑승을" else "하차를"} 기록했어요") {
+            Voice.askConfirm { ok -> if (ok) TripEngine.dismissCard() else TripEngine.undoCard() }
+        }
+        try {
+            delay(9000)
+            TripEngine.dismissCard()
+        } finally {
+            Voice.stopListening()
+        }
     }
     Column(Modifier.fillMaxSize()) {
         Header(if (parked) "정차 중" else "카풀 기록 중", if (parked) Orange else Green)
@@ -864,13 +935,42 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
     var folders by remember { mutableStateOf(JSONArray()) }
     var chosen by remember { mutableStateOf<String?>(null) }
     var newFolder by remember { mutableStateOf("") }
+    var tollEdit by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         val a = TripEngine.computeSettlement()
+        if (a != null) {
+            val riders = a.shares.count { !it.rider.isDriver }
+            Voice.say("오늘 총비용 ${NumberFormat.getInstance().format(a.total)}원, 동승자 ${riders}명에게 보낼 준비가 됐어요")
+        }
         // keep trying until the passengers' pages have it (a dropped connection must not leave it unposted)
         while (a != null && !TripEngine.postSettlement()) delay(4000)
         runCatching { folders = rpc.call("get_trip_admin", args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret)).optJSONArray("folders") ?: JSONArray() }
     }
     val a = trip.allocation
+    tollEdit?.let { value ->
+        Dialog(onDismissRequest = { tollEdit = null }) {
+            Card(Modifier.width(560.dp)) {
+                Title("통행료 고치기", 26)
+                Body("내비는 남은 길의 통행료만 알려 줘요. 하이패스 기록을 보고 실제 낸 금액으로 고쳐요.", size = 16)
+                Spacer(Modifier.height(16.dp))
+                val apply = {
+                    val won = value.toLongOrNull() ?: 0
+                    tollEdit = null
+                    TripEngine.setToll(won)
+                    scope.launch {
+                        val again = TripEngine.computeSettlement()
+                        while (again != null && !TripEngine.postSettlement()) delay(4000)
+                    }
+                }
+                Field("통행료 (원)", value, { tollEdit = it.filter(Char::isDigit) }, onDone = { apply() })
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Btn("취소", Modifier.weight(1f), primary = false) { tollEdit = null }
+                    Btn("다시 나누기", Modifier.weight(1f)) { apply() }
+                }
+            }
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         Header("도착, 주차 중")
         if (a == null) {
@@ -892,12 +992,12 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Stat("기름값", won(a.fuelAmount), Modifier.weight(1f))
-                    Stat("통행료", won(a.toll), Modifier.weight(1f))
+                    Stat("통행료 (눌러서 고치기)", won(a.toll), Modifier.weight(1f).clickable { tollEdit = a.toll.toString() })
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Stat("총 거리", "%.1fkm".format(trip.settlementKm), Modifier.weight(1f))
-                    Stat("연비", "%.1fkm/L".format(trip.efficiencyKmL ?: 12.0), Modifier.weight(1f))
+                    Stat("연비", "%.1fkm/L".format(trip.efficiencyKmL ?: TripEngine.defaultEfficiency), Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
                 Body(if (trip.settlementPosted) "동승자 페이지에 정산을 올렸어요" else "정산을 올리는 중이에요", if (trip.settlementPosted) Green else Sub, 17)

@@ -8,6 +8,9 @@ import ai.pleos.playground.navi.data.RouteInfo
 import ai.pleos.playground.navi.data.RouteOverviewShowInfo
 import ai.pleos.playground.navi.data.RouteStartInfo
 import ai.pleos.playground.navi.data.RouteWithWaypointsRequest
+import ai.pleos.playground.location.fused.FusedLocation
+import ai.pleos.playground.location.fused.listener.FusedLocationListener
+import ai.pleos.playground.location.fused.model.LocationData
 import ai.pleos.playground.navi.helper.NaviHelper
 import ai.pleos.playground.navi.helper.listener.NaviHelperEventListener
 import ai.pleos.playground.vehicle.Vehicle
@@ -100,6 +103,7 @@ class NaviBridge(context: Context) {
 class TripService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private var vehicle: Vehicle? = null
+    private var fused: FusedLocation? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -121,6 +125,9 @@ class TripService : Service() {
             TripEngine.navi = runCatching { NaviBridge(applicationContext) }
                 .onFailure { TripEngine.log("내비 연결 실패: ${it.message}") }.getOrNull()
         }
+        fused = runCatching { FusedLocation(applicationContext).also { it.initialize() } }
+            .onFailure { TripEngine.log("위치 SDK 연결 실패: ${it.message}") }.getOrNull()
+        Voice.init(applicationContext)
         main.postDelayed({ register() }, 1500)
     }
 
@@ -166,6 +173,7 @@ class TripService : Service() {
         guarded("주행거리") { registerOdometer(v) }
         guarded("기어") { registerGear(v) }
         guarded("연비") { registerFuel(v) }
+        guarded("위치") { registerLocation() }
         TripEngine.log("차량 센서 연결: 좌석 3, 문 3, 주행거리, 기어, 연비")
     }
 
@@ -224,6 +232,23 @@ class TripService : Service() {
         v.getGear().getCurrentGearSelectionState({ g -> main.post { TripEngine.onGear(g?.name ?: "?") } }, { })
     }
 
+    /** Pleos FusedLocation: where boardings and drop-offs really happened, if the navi is slow to say. */
+    private fun registerLocation() {
+        val f = fused ?: return
+        if (!f.isSupported()) {
+            TripEngine.log("위치 SDK: 이 차에서는 지원하지 않음")
+            return
+        }
+        val listener = object : FusedLocationListener {
+            override fun onChanged(data: LocationData?) {
+                if (data != null) main.post { TripEngine.onLocation(data.latitude, data.longitude) }
+            }
+            override fun onError(e: Exception) = fail("위치", e)
+        }
+        f.registerFusedLocationCallback(listener)
+        f.getLastKnownLocation(listener)
+    }
+
     private fun registerFuel(v: Vehicle) {
         v.getFuel().registerInstantaneousFuelEconomy(object : FuelEconomyListener {
             override fun onFuelEconomyUpdated(value: Float?) {}
@@ -240,6 +265,8 @@ class TripService : Service() {
         main.removeCallbacksAndMessages(null)
         runCatching { vehicle?.release() }
         vehicle = null
+        runCatching { fused?.release() }
+        fused = null
         super.onDestroy()
     }
 

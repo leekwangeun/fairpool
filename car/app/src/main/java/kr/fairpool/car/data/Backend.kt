@@ -56,6 +56,10 @@ class Config(context: Context) {
     var fuelPrice: Int
         get() = prefs.getInt("fuel_price", 1700)
         set(v) = prefs.edit().putInt("fuel_price", v).apply()
+    /** Used when the car does not report fuel economy (the emulator is an EV). */
+    var efficiency: Float
+        get() = prefs.getFloat("efficiency", 11f)
+        set(v) = prefs.edit().putFloat("efficiency", v).apply()
 }
 
 class RpcException(val code: String) : Exception(code)
