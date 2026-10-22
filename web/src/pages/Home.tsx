@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { rpc, type Driver, type FolderItem } from '../api';
+import { ApiError, rpc, type Driver, type FolderItem } from '../api';
 import { store } from '../store';
 import { BatchPill, Button, Card, ErrorText, Field, Page, StatusPill, TextInput, won } from '../ui';
 
@@ -22,7 +22,11 @@ export default function Home() {
     }
     rpc<Driver>('get_driver', { p_driver_secret: secret })
       .then(setDriver)
-      .catch(() => store.setDriverSecret(null))
+      // forget the secret only when the server says it is not valid, not on a dropped connection
+      .catch((e) => {
+        if (e instanceof ApiError && e.code === 'not_allowed') store.setDriverSecret(null);
+        else setError((e as Error).message);
+      })
       .finally(() => setLoading(false));
     rpc<FolderItem[]>('list_folders', { p_secret: secret })
       .then(setFolders)
@@ -170,12 +174,23 @@ export default function Home() {
       {driver.trips.length > 0 && (
         <Card className="flex flex-col gap-1">
           <h2 className="mb-2 font-semibold">최근 운행</h2>
-          {driver.trips.map((t) => (
-            <Link key={t.code} to={`/d/${t.code}`} className="flex items-center justify-between rounded-lg py-2">
-              <span className="truncate">{t.title}</span>
-              <StatusPill status={t.status} />
-            </Link>
-          ))}
+          {driver.trips.map((t) =>
+            // trips made on the car are managed there; this phone has no admin secret for them
+            store.adminSecret(t.code) ? (
+              <Link key={t.code} to={`/d/${t.code}`} className="flex items-center justify-between rounded-lg py-2">
+                <span className="truncate">{t.title}</span>
+                <StatusPill status={t.status} />
+              </Link>
+            ) : (
+              <div key={t.code} className="flex items-center justify-between gap-2 rounded-lg py-2">
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate">{t.title}</span>
+                  <span className="t-caption text-faint">차 화면에서 만든 운행이에요</span>
+                </span>
+                <StatusPill status={t.status} />
+              </div>
+            ),
+          )}
         </Card>
       )}
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
-import { rpc, ruleName, type DriverView, type Place, type PublicTrip, type Stop } from '../api';
+import { ApiError, rpc, ruleName, type DriverView, type Place, type PublicTrip, type Rule, type Stop } from '../api';
 import { store } from '../store';
 import DriverSend from './DriverSend';
 import {
@@ -46,8 +46,10 @@ export default function PassengerTrip() {
   async function load() {
     try {
       setTrip(await rpc<PublicTrip>('get_trip', { p_code: code, p_device_key: deviceKey }));
+      setNotFound(null);
     } catch (e) {
-      setNotFound((e as Error).message);
+      // a dropped connection keeps the last view; only a wrong code replaces it
+      if (e instanceof ApiError && e.code === 'trip_not_found') setNotFound(e.message);
     }
   }
   usePolling(load);
@@ -96,9 +98,8 @@ export default function PassengerTrip() {
       <Settled trip={trip} deviceKey={deviceKey} />
     );
   }
-  return (
-    <Riding trip={trip} onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined} />
-  );
+  // the server keeps the pickup once on board and the whole ride once dropped off
+  return <Riding trip={trip} onEdit={!trip.me.boarded ? () => setMode('edit') : undefined} />;
 }
 
 // After departure the invite QR lets newcomers in only while the car shows it again at a stop.
@@ -143,8 +144,9 @@ function Join({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const full = !editing && trip.seats_left <= 0;
   // stops must come from the search list so they carry coordinates for the car's navigation
-  const ready = name.trim() && (editing || phone4.length === 4) && hasPoint(dropoff) && (!onTheWay || hasPoint(pickup));
+  const ready = !full && name.trim() && (editing || phone4.length === 4) && hasPoint(dropoff) && (!onTheWay || hasPoint(pickup));
 
   async function submit() {
     setBusy(true);
@@ -176,7 +178,7 @@ function Join({
           <Chip>
             자리 {trip.seats}개 중 {trip.seats_left}개 남음
           </Chip>
-          <Chip>{ruleName[trip.rule]} 정산</Chip>
+          <Chip>{ruleName[trip.rule]}</Chip>
           <Link to={`/t/${trip.code}/how`} aria-label="계산 방법 보기">
             <img src={iconInfo} width={22} height={22} alt="" />
           </Link>
@@ -214,7 +216,11 @@ function Join({
         </p>
       </Card>
 
-      {!editing && <p className="t-caption text-center text-sub">참여하면 픽업 시간과 정산 금액을 여기서 볼 수 있어요</p>}
+      {full ? (
+        <p className="t-caption text-center text-red-600">자리가 모두 찼어요. 함께 타려면 {trip.driver_name}님에게 말해 주세요</p>
+      ) : (
+        !editing && <p className="t-caption text-center text-sub">참여하면 픽업 시간과 정산 금액을 여기서 볼 수 있어요</p>
+      )}
       <ErrorText error={error} />
       <Button onClick={submit} disabled={busy || !ready}>
         {editing ? '저장하기' : '참여하기'}
@@ -288,6 +294,9 @@ function Verify({
           <h1 className="t-title">이 운행에 참여한 사람인가요?</h1>
           <p className="t-body text-sub">처음 참여한 휴대폰이 아니라서 한 번 확인할게요</p>
           <p className="t-caption text-faint">{trip.driver_name}님이라면 차 화면에 넣은 이름과 번호 뒤 4자리로 보낼 초대와 정산을 볼 수 있어요</p>
+          {!onBack && (
+            <p className="t-caption text-faint">운전자가 탑승 기록을 지운 운행은 다시 열 수 없어요</p>
+          )}
         </div>
         <Field label="이름">
           <TextInput value={name} onChange={setName} />
@@ -351,6 +360,27 @@ function Riding({ trip, onEdit }: { trip: PublicTrip; onEdit?: () => void }) {
       : ahead.every((s) => s.kind === 'other_dropoff')
         ? `다음은 동승자 ${ahead.length}명이 내리고, 그다음이 나예요`
         : `나보다 먼저 ${ahead.length}곳을 들러요`;
+
+  if (me.alighted) {
+    return (
+      <Page gap={14}>
+        <Card className="gap-1">
+          <p className="t-caption text-brand">내렸어요 | {trip.title}</p>
+          <h1 className="t-title">함께 타 주셔서 고마워요</h1>
+          <p className="t-body text-sub">{trip.driver_name}님이 운행을 마치면 여기서 정산 결과를 볼 수 있어요</p>
+        </Card>
+        {me.estimate != null && (
+          <Card className="gap-1">
+            <div className="flex items-center gap-2">
+              <span className="t-strong flex-1">예상 내 몫</span>
+              <span className="t-title text-brand">약 {won(me.estimate)}</span>
+            </div>
+            <p className="t-caption text-sub">다른 동승자가 모두 내리면 확정돼요</p>
+          </Card>
+        )}
+      </Page>
+    );
+  }
 
   return (
     <Page gap={14}>
@@ -440,11 +470,13 @@ function Riding({ trip, onEdit }: { trip: PublicTrip; onEdit?: () => void }) {
 
 // ------------------------------------------------------------------ M3 정산
 
-const ruleText = {
-  shapley: '함께 타서 아낀 돈은 모두 나누고, 돌아간 거리는 만든 사람이 더 냈어요.',
+const ruleText: Record<Rule, string> = {
+  shapley: '함께 타서 아낀 돈을 각자 만든 거리만큼 나눴어요.',
   distance: '총비용을 각자 함께 탄 거리만큼 나눴어요.',
   equal: '총비용을 똑같이 나눴어요.',
 };
+// "공정 정산으로", "탄 거리 비례로", "N분의 1로"
+const ruleWith = (rule: Rule) => ruleName[rule] + (rule === 'shapley' ? '으로' : '로');
 
 function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
   const s = trip.settlement!;
@@ -460,6 +492,9 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
           <p className="t-caption text-brand">운행이 끝났어요 | {trip.title}</p>
           {trip.settle_mode === 'direct' && <BatchPill status={trip.paid ? 'done' : 'requested'} />}
         </div>
+        {!trip.settle_mode && (
+          <p className="t-caption text-sub">{trip.driver_name}님이 정산 방법을 고르는 중이에요. 고르면 보낼 곳이 여기에 떠요</p>
+        )}
         <p className="t-strong text-sub">내 몫</p>
         <div className="flex items-baseline gap-1">
           <span className="t-number">{mine ? Math.round(mine.amount).toLocaleString('ko-KR') : '-'}</span>
@@ -473,17 +508,15 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
         )}
         <div className="mt-1 flex flex-col gap-0.5 rounded-xl bg-brand-soft p-3.5">
           <div className="flex items-center gap-1.5">
-            <span className="t-strong text-brand">
-              {ruleName[rule]}, 운전자 {withDriver ? '포함' : '제외'}으로 나눴어요
-            </span>
+            <span className="t-strong text-brand">{ruleWith(rule)} 나눴어요</span>
             <Link to={`/t/${trip.code}/how`} aria-label="계산 방법 보기" className="shrink-0">
               <img src={iconInfo} width={22} height={22} alt="" />
             </Link>
           </div>
           <p className="t-caption text-brand">
             {ruleText[rule]}
-            <br />
-            {withDriver ? '운전자도 한 사람 몫으로 포함했어요' : '운전자 몫은 빼고 동승자끼리 나눴어요'}
+            {mine?.alone != null && mine.alone > mine.amount ? ` 혼자 갔다면 ${won(mine.alone)}이었어요` : ''}
+            {!withDriver && ' 운전자 몫은 빼고 동승자끼리 나눴어요'}
           </p>
         </div>
       </Card>
@@ -539,7 +572,11 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
 
       <PayActions
         bank={trip.bank}
-        onReport={(message) => rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_message: message })}
+        driverName={trip.driver_name}
+        context={`${trip.title}${mine ? ` | 내 몫 ${won(mine.amount)}` : ''}`}
+        onReport={(kind, message) =>
+          rpc('report_issue', { p_code: trip.code, p_device_key: deviceKey, p_kind: kind, p_message: message })
+        }
       />
       {trip.corrections > 0 && (
         <p className="t-caption text-center text-sub">운전자가 이 정산을 {trip.corrections}번 정정했어요. 지금 금액이 정정한 금액이에요</p>

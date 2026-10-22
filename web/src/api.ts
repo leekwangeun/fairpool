@@ -13,13 +13,14 @@ const messages: Record<string, string> = {
   trip_closed: '이미 끝난 운행이에요.',
   join_closed: '이미 출발한 운행이에요. 차가 멈추면 운전자에게 차 화면의 QR을 다시 띄워 달라고 해 주세요.',
   trip_full: '자리가 모두 찼어요.',
-  trip_started: '이미 출발한 운행이라 빠질 수 없어요.',
   not_allowed: '이 운행을 관리할 권한이 없어요.',
   name_required: '이름을 입력해 주세요.',
   place_needs_location: '장소는 검색 목록에서 골라 주세요.',
   verify_failed: '이름이나 번호가 맞지 않아요.',
   too_many_attempts: '확인을 너무 많이 시도했어요. 1시간 뒤에 다시 해 주세요.',
-  settle_started: '이미 정산을 마친 사람이 있어 정정할 수 없어요. 정산 완료를 모두 풀면 다시 정정할 수 있어요.',
+  settle_started: '이미 정산을 마친 사람이 있어 바꿀 수 없어요. 정산 완료 체크를 모두 풀면 다시 바꿀 수 있어요.',
+  not_direct: '바로 정산한 운행에서만 정산 완료를 체크할 수 있어요.',
+  bad_kind: '문제 종류를 골라 주세요.',
   record_deleted: '탑승 기록을 지운 사람은 정산 완료를 풀 수 없어요.',
   link_expired: '연결 코드가 만료됐어요. 차 화면에서 새 QR을 띄워 주세요.',
   carpool_not_found: '즐겨찾기 카풀을 찾을 수 없어요.',
@@ -122,7 +123,20 @@ export type Share = {
   to?: string;
   is_me?: boolean;
   passenger_id?: string | null;
+  // what this passenger would have paid alone (optional, sent by the car)
+  alone?: number;
 };
+
+// M3-1 "어떤 문제가 있나요?"
+export type IssueKind = 'place' | 'people' | 'amount' | 'other';
+export const issueKinds: { kind: IssueKind; label: string }[] = [
+  { kind: 'place', label: '탄 곳이나 내린 곳이 달라요' },
+  { kind: 'people', label: '함께 탄 사람이 달라요' },
+  { kind: 'amount', label: '금액이 이상해요' },
+  { kind: 'other', label: '기타' },
+];
+export const issueLabel = (kind: IssueKind) => issueKinds.find((k) => k.kind === kind)?.label ?? '기타';
+export type Issue = { id: string; kind: IssueKind; name: string | null; message: string | null; created_at: string; resolved_at: string | null };
 
 export type Settlement = {
   rule?: Rule;
@@ -246,7 +260,7 @@ export type FolderAdmin = {
   requested: (BatchSummary & {
     requested_at: string;
     code: string;
-    issues: { name: string | null; message: string; created_at: string }[];
+    issues: Issue[];
     payments: { id: string; name: string; amount: number; trips: number; paid: boolean }[];
   }) | null;
   open: BatchSummary;
@@ -292,7 +306,7 @@ export type AdminTrip = {
   folders: { code: string; name: string; trips: number; amount: number }[];
   suggested_folder: string | null;
   revisions: { total: number | null; reason: string | null; replaced_at: string }[];
-  issues: { name: string | null; message: string; created_at: string }[];
+  issues: Issue[];
 };
 
 export type Driver = {
@@ -306,7 +320,7 @@ export type Driver = {
 export type CarpoolMember = { id: string; name: string; pickup: string | null; dropoff: string | null };
 
 export const ruleName: Record<Rule, string> = {
-  shapley: '섀플리 값',
+  shapley: '공정 정산',
   distance: '탄 거리 비례',
   equal: 'N분의 1',
 };

@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import QRCode from 'qrcode';
-import { demoMode, searchPlaces, type Bank, type BatchStatus, type Place, type TripStatus } from './api';
+import { demoMode, issueKinds, searchPlaces, type Bank, type BatchStatus, type IssueKind, type Place, type TripStatus } from './api';
 import glyph from './assets/figma/glyph.svg';
 import iconSearch from './assets/figma/icon-search.svg';
 import radioOff from './assets/figma/radio-off.svg';
@@ -179,6 +179,8 @@ export function OptionCard({
   return (
     <button
       type="button"
+      role="radio"
+      aria-checked={selected}
       onClick={onClick}
       className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-3 text-left ${
         selected ? 'border-2 border-brand bg-brand-soft' : 'border-[1.5px] border-line bg-card'
@@ -349,8 +351,19 @@ export function RideList({ title, rides, shown }: { title: string; rides: { date
 }
 
 // "정산에 문제가 있어요" and, while this passenger's settlement is in progress, "계좌번호 복사".
-export function PayActions({ bank, onReport }: { bank: Bank | null; onReport: (message: string) => Promise<unknown> }) {
+export function PayActions({
+  bank,
+  driverName,
+  context,
+  onReport,
+}: {
+  bank: Bank | null;
+  driverName: string;
+  context: string;
+  onReport: (kind: IssueKind, message: string) => Promise<unknown>;
+}) {
   const [copied, setCopied] = useState(false);
+  const [reporting, setReporting] = useState(false);
   const [reported, setReported] = useState(false);
 
   async function copyAccount() {
@@ -360,17 +373,27 @@ export function PayActions({ bank, onReport }: { bank: Bank | null; onReport: (m
     }
   }
 
-  async function report() {
-    const message = window.prompt('어떤 점이 이상한가요? 운전자에게 전할게요', '정산에 문제가 있어요');
-    if (message === null) return;
-    await onReport(message);
-    setReported(true);
+  if (reporting) {
+    return (
+      <div className="fixed inset-0 z-50 overflow-y-auto bg-page">
+        <ReportIssue
+          driverName={driverName}
+          context={context}
+          onCancel={() => setReporting(false)}
+          onSend={async (kind, message) => {
+            await onReport(kind, message);
+            setReporting(false);
+            setReported(true);
+          }}
+        />
+      </div>
+    );
   }
 
   return (
     <>
       <div className="flex w-full gap-2.5">
-        <Button variant="secondary" onClick={report} disabled={reported} className="flex-1">
+        <Button variant="secondary" onClick={() => setReporting(true)} disabled={reported} className="flex-1">
           {reported ? '운전자에게 알렸어요' : '정산에 문제가 있어요'}
         </Button>
         {bank && (
@@ -385,6 +408,81 @@ export function PayActions({ bank, onReport }: { bank: Bank | null; onReport: (m
         </p>
       )}
     </>
+  );
+}
+
+// M3-1 정산에 문제가 있어요: what is wrong and an optional note; it arrives on the car screen (L1-8).
+// There is no delete or leave choice here: the driver handles those on the car.
+function ReportIssue({
+  driverName,
+  context,
+  onCancel,
+  onSend,
+}: {
+  driverName: string;
+  context: string;
+  onCancel: () => void;
+  onSend: (kind: IssueKind, message: string) => Promise<void>;
+}) {
+  const [kind, setKind] = useState<IssueKind | null>(null);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function send() {
+    if (!kind) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onSend(kind, message);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Page>
+      <div className="flex flex-col gap-1">
+        <p className="t-caption text-brand">{context}</p>
+        <h1 className="t-title">어떤 문제가 있나요?</h1>
+      </div>
+      <Card className="gap-2.5">
+        <div role="radiogroup" aria-label="문제 종류" className="flex flex-col gap-2.5">
+          {issueKinds.map((k) => (
+            <OptionCard key={k.kind} selected={kind === k.kind} onClick={() => setKind(k.kind)} title={k.label} />
+          ))}
+        </div>
+      </Card>
+      <Card className="gap-2.5">
+        <label htmlFor="issue-message" className="t-strong">
+          {driverName}님에게 남길 말 (선택)
+        </label>
+        <textarea
+          id="issue-message"
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          maxLength={500}
+          rows={4}
+          placeholder="예: 신촌역 3번 출구에서 탔어요"
+          className="t-body w-full resize-none rounded-xl bg-tile px-3.5 py-3 outline-none placeholder:text-faint focus:ring-2 focus:ring-brand"
+        />
+      </Card>
+      <p className="t-caption text-sub">
+        {driverName}님 차 화면에 요청이 가고, {driverName}님이 고치면 금액이 다시 계산돼요
+      </p>
+      <ErrorText error={error} />
+      <div className="flex-1" />
+      <div className="flex w-full gap-2.5">
+        <Button variant="secondary" onClick={onCancel} className="flex-1">
+          취소
+        </Button>
+        <Button onClick={send} disabled={!kind || busy} className="t-strong! flex-1">
+          요청 보내기
+        </Button>
+      </div>
+    </Page>
   );
 }
 

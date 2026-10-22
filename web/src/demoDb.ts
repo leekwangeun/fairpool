@@ -19,8 +19,13 @@ function open(): Promise<PGlite> {
   return ready;
 }
 
+// Only the functions granted to anon in the migration, as on Supabase; internal helpers stay closed.
+const granted = new Set(
+  (migration.match(/api text\[\] := array\[([\s\S]*?)\];/)?.[1].match(/'[a-z_]+'/g) ?? []).map((s) => s.slice(1, -1)),
+);
+
 export async function demoRpc(fn: string, args: Record<string, unknown>) {
-  if (!/^[a-z_]+$/.test(fn)) throw new Error('bad function name');
+  if (!granted.has(fn)) throw new Error('not_allowed');
   const db = await open();
   const names = Object.keys(args).filter((k) => args[k] !== undefined);
   const params = names.map((n) => {

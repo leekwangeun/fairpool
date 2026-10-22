@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { rpc, type DriverView, type SettlePage as Settle } from '../api';
+import { ApiError, rpc, type DriverView, type SettlePage as Settle } from '../api';
 import { store } from '../store';
 import DriverSend from './DriverSend';
 import {
@@ -34,7 +34,10 @@ export default function SettlePage() {
   async function load() {
     try {
       setPage(await rpc<Settle>('get_settle_page', { p_code: code, p_device_key: deviceKey }));
+      setError(null);
     } catch (e) {
+      // the driver cancelled the request while this page was open; other errors keep the last view
+      if (e instanceof ApiError && e.code === 'page_not_found') setPage(null);
       setError((e as Error).message);
     }
   }
@@ -78,7 +81,7 @@ export default function SettlePage() {
         </p>
         <Amount value={me.amount} />
         <p className="t-caption text-sub">
-          {sameEach ? `${me.trips}회 × ${won(amounts[0])}` : '회마다 금액이 달라요'}
+          {sameEach ? `${me.trips}회 × ${won(amounts[0])}` : '운행마다 함께 탄 사람과 코스가 달라 금액도 달라요'}
           {sameCourse && ` | ${first.from} → ${first.to}${first.km != null ? ` ${Math.round(first.km)}km` : ''}`}
         </p>
       </Card>
@@ -100,7 +103,11 @@ export default function SettlePage() {
       ) : (
         <PayActions
           bank={page.bank}
-          onReport={(message) => rpc('report_settle_issue', { p_code: page.code, p_device_key: deviceKey, p_message: message })}
+          driverName={page.driver_name}
+          context={`${page.name} ${me.trips}회 | 내 분담액 ${won(me.amount)}`}
+          onReport={(kind, message) =>
+            rpc('report_settle_issue', { p_code: page.code, p_device_key: deviceKey, p_kind: kind, p_message: message })
+          }
         />
       )}
       <p className="t-caption text-center text-faint">

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { demoMode, rpc, type BatchSummary, type FolderAdmin as Folder } from '../api';
+import { demoMode, issueLabel, rpc, type BatchSummary, type FolderAdmin as Folder } from '../api';
 import { settleLink, store } from '../store';
 import { BatchPill, Button, Card, Checkbox, ErrorText, Page, QrImage, copyText, dayLabel, usePolling, won } from '../ui';
 
@@ -169,9 +169,11 @@ export default function FolderAdmin() {
       {req && req.issues.length > 0 && (
         <Card className="gap-2">
           <h2 className="t-strong">동승자가 남긴 문제</h2>
-          {req.issues.map((i, n) => (
-            <p key={n} className="t-body">
-              <span className="text-sub">{i.name ?? '동승자'}</span> {i.message}
+          {req.issues.map((i) => (
+            <p key={i.id} className={`t-body ${i.resolved_at ? 'text-faint' : ''}`}>
+              <span className="text-sub">{i.name ?? '동승자'}</span> {issueLabel(i.kind)}
+              {i.message && ` | "${i.message}"`}
+              {i.resolved_at && ' (처리함)'}
             </p>
           ))}
         </Card>
@@ -181,7 +183,8 @@ export default function FolderAdmin() {
       <div className="flex w-full gap-2.5">
         {req ? (
           <>
-            <Button variant="secondary" onClick={cancel} className="flex-1">
+            {/* a received payment would be erased: untick it first (the server refuses with settle_started) */}
+            <Button variant="secondary" onClick={cancel} disabled={req.payments.some((p) => p.paid)} className="flex-1">
               정산 요청 취소
             </Button>
             <Button onClick={share} className="t-strong! flex-1">

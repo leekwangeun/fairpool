@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { demoMode, rpc, ruleName, type AdminTrip, type Settlement } from '../api';
+import { demoMode, issueLabel, rpc, ruleName, type AdminTrip, type Settlement } from '../api';
 import { carpoolLink, store, tripLink } from '../store';
 import {
   BatchPill,
@@ -86,9 +86,23 @@ export default function DriverTrip() {
     run(() => rpc('delete_ride_record', { p_code: code, p_admin_secret: secret, p_passenger_id: id }));
   }
 
-  const cancel = () =>
-    window.confirm('운행을 취소할까요? 동승자 링크도 닫혀요.') &&
-    run(() => rpc('set_trip_status', { p_code: code, p_admin_secret: secret, p_status: 'cancelled' })).then(() => navigate('/'));
+  async function cancel() {
+    if (!window.confirm('운행을 취소할까요? 동승자 링크도 닫혀요.')) return;
+    setError(null);
+    try {
+      await rpc('set_trip_status', { p_code: code, p_admin_secret: secret, p_status: 'cancelled' });
+      navigate('/');
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  function removePassenger(id: string, name: string) {
+    if (!window.confirm(`${name} 님을 이 운행에서 뺄까요? 들를 곳에서도 빠져요.`)) return;
+    run(() => rpc('remove_passenger', { p_code: code, p_admin_secret: secret, p_passenger_id: id }));
+  }
+
+  const live = trip?.status === 'preparing' || trip?.status === 'in_progress';
 
   return (
     <Page back="/">
@@ -104,32 +118,33 @@ export default function DriverTrip() {
         {trip && <StatusPill status={trip.status} />}
       </div>
 
-      <Card className="items-center gap-4 text-center">
-        <p className="t-caption text-sub">
-          {trip?.status === 'in_progress'
-            ? '출발한 운행이라 새 동승자는 차가 멈춘 뒤 차 화면에 QR을 다시 띄웠을 때만 참여할 수 있어요'
-            : '동승자가 찍으면 이 운행 페이지가 열려요'}
-        </p>
-        <QrImage text={link} />
-        <div>
-          <p className="t-caption text-sub">운행 코드</p>
-          <p className="font-mono text-2xl font-bold tracking-[0.2em]">{code.toUpperCase()}</p>
-        </div>
-        <div className="flex w-full gap-2.5">
-          <Button variant="secondary" onClick={() => copy(link, 'link')} className="flex-1">
-            {copied === 'link' ? '복사했어요' : '링크 복사'}
-          </Button>
-          <Button onClick={share} className="t-strong! flex-1">
-            링크 보내기
-          </Button>
-        </div>
-      </Card>
+      {live && (
+        <Card className="items-center gap-4 text-center">
+          <p className="t-caption text-sub">
+            {trip?.status === 'in_progress'
+              ? '출발한 운행이라 새 동승자는 차가 멈춘 뒤 차 화면에 QR을 다시 띄웠을 때만 참여할 수 있어요'
+              : '동승자가 찍으면 이 운행 페이지가 열려요'}
+          </p>
+          <QrImage text={link} />
+          <div>
+            <p className="t-caption text-sub">운행 코드</p>
+            <p className="font-mono text-2xl font-bold tracking-[0.2em]">{code.toUpperCase()}</p>
+          </div>
+          <div className="flex w-full gap-2.5">
+            <Button variant="secondary" onClick={() => copy(link, 'link')} className="flex-1">
+              {copied === 'link' ? '복사했어요' : '링크 복사'}
+            </Button>
+            <Button onClick={share} className="t-strong! flex-1">
+              링크 보내기
+            </Button>
+          </div>
+        </Card>
+      )}
 
       <Card className="gap-3">
         <h2 className="t-strong">함께 타는 사람 {trip ? `${trip.passengers.length}명` : ''}</h2>
         {trip?.passengers.length === 0 && <p className="t-caption text-sub">아직 참여한 사람이 없어요.</p>}
         {trip?.passengers.map((p) => {
-          const live = trip.status === 'preparing' || trip.status === 'in_progress';
           const canRemovePlace = live && !p.boarded_at && (p.pickup || p.dropoff);
           const canDeleteRecord = p.settle_done && !p.record_deleted_at;
           return (
@@ -150,7 +165,7 @@ export default function DriverTrip() {
               {live && !p.boarded_at && (
                 <button
                   type="button"
-                  onClick={() => run(() => rpc('remove_passenger', { p_code: code, p_admin_secret: secret, p_passenger_id: p.id }))}
+                  onClick={() => removePassenger(p.id, p.name)}
                   aria-label={`${p.name} 님을 운행에서 빼기`}
                   className="t-strong shrink-0 px-1 text-faint"
                 >
@@ -175,9 +190,11 @@ export default function DriverTrip() {
       {trip && trip.issues.length > 0 && (
         <Card className="gap-2">
           <h2 className="t-strong">동승자가 남긴 문제</h2>
-          {trip.issues.map((i, n) => (
-            <p key={n} className="t-body">
-              <span className="text-sub">{i.name ?? '동승자'}</span> {i.message}
+          {trip.issues.map((i) => (
+            <p key={i.id} className={`t-body ${i.resolved_at ? 'text-faint' : ''}`}>
+              <span className="text-sub">{i.name ?? '동승자'}</span> {issueLabel(i.kind)}
+              {i.message && ` | "${i.message}"`}
+              {i.resolved_at && ' (처리함)'}
             </p>
           ))}
         </Card>
@@ -286,8 +303,11 @@ function SettleSection({ trip, secret, run }: { trip: AdminTrip; secret: string;
   );
 
   if (trip.settle_mode && !changing) {
-    const locked = trip.folder != null && trip.folder.status !== 'open';
-    const allPaid = trip.passengers.length > 0 && trip.passengers.every((p) => p.paid_at);
+    const billed = s.shares.filter((x) => x.role !== 'driver' && x.passenger_id).map((x) => x.passenger_id);
+    const anyPaid = billed.some((id) => paidAt(id));
+    // once someone paid, the method stays (the server refuses with settle_started)
+    const locked = (trip.folder != null && trip.folder.status !== 'open') || anyPaid;
+    const allPaid = billed.length > 0 && billed.every((id) => paidAt(id));
     return (
       <Card className="gap-2.5">
         <div className="flex items-center gap-2">
@@ -421,7 +441,7 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
   }
 
   function settle() {
-    const fuel = { distance_km: 80, efficiency_km_l: 11, amount: 12370 };
+    const fuel = { distance_km: 80, efficiency_km_l: 11, amount: 12360 };
     const toll = 3000;
     const total = fuel.amount + toll;
     const people = trip.include_driver ? ps.length + 1 : ps.length;
