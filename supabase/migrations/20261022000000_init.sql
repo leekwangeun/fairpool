@@ -217,12 +217,13 @@ create table public.trip_issues (
   created_at   timestamptz not null default now()
 );
 
--- "내 휴대폰으로 보내기" on the car: a settlement the driver wants to pass on from their own phone.
--- One row per trip (바로 정산, or a trip still stacking in a folder) or per requested folder batch.
+-- "내 휴대폰으로 보내기" on the car: an invite or a settlement the driver wants to pass on from their own
+-- phone. One row per trip (its invite, then its settlement) or per requested folder batch.
 create table public.share_requests (
   id         uuid primary key default gen_random_uuid(),
   trip_id    uuid references public.trips(id) on delete cascade,
   batch_id   uuid references public.folder_batches(id) on delete cascade,
+  kind       text not null default 'settle' check (kind in ('invite', 'settle')),
   created_at timestamptz not null default now(),
   check ((trip_id is null) <> (batch_id is null))
 );
@@ -1345,8 +1346,21 @@ begin
     'bank', public._bank_of(d));
 end $$;
 
--- What "내 휴대폰으로 보내기" put on the driver's phone, for the link that was opened: that trip and the
--- folder batch it belongs to. A card goes away once everyone in it has paid.
+-- The invite of a trip that has not ended (L2/P2): who has joined and the seats left.
+create or replace function public._invite_card(t public.trips) returns jsonb
+language sql stable set search_path = public, extensions as $$
+  select jsonb_build_object(
+    'kind', 'invite', 'code', t.code, 'title', t.title, 'date', t.created_at,
+    'origin', t.origin ->> 'label', 'seats', t.seats,
+    'seats_left', greatest(t.seats - (select count(*) from public.trip_passengers where trip_id = t.id), 0),
+    'total', null, 'bank', null,
+    'people', (select coalesce(jsonb_agg(jsonb_build_object('name', name, 'amount', null, 'paid', false)
+                 order by joined_at), '[]'::jsonb)
+               from public.trip_passengers where trip_id = t.id))
+$$;
+
+-- What "내 휴대폰으로 보내기" put on the driver's phone, for the link that was opened: that trip's invite
+-- or settlement and the folder batch it belongs to. A settlement card goes once everyone in it has paid.
 create or replace function public._driver_view(d public.drivers, p_trip uuid, p_batch uuid) returns jsonb
 language plpgsql stable set search_path = public, extensions as $$
 declare
@@ -1355,7 +1369,12 @@ declare
   cards jsonb := '[]'::jsonb;
 begin
   select * into t from public.trips where id = p_trip;
-  if t.id is not null and t.status = 'settled' and exists (select 1 from public.share_requests where trip_id = t.id)
+  if t.id is not null and t.status in ('preparing', 'in_progress')
+     and exists (select 1 from public.share_requests where trip_id = t.id and kind = 'invite') then
+    cards := cards || jsonb_build_array(public._invite_card(t));
+  end if;
+  if t.id is not null and t.status = 'settled'
+     and exists (select 1 from public.share_requests where trip_id = t.id and kind = 'settle')
      and ((t.settle_mode = 'direct' and exists (select 1 from public.trip_passengers where trip_id = t.id and paid_at is null))
           or (t.settle_mode = 'folder' and (select status from public.folder_batches where id = t.batch_id) = 'open')) then
     cards := cards || jsonb_build_array(public._trip_card(t));
@@ -1367,12 +1386,17 @@ begin
   return jsonb_build_object('driver_name', d.display_name, 'cards', cards);
 end $$;
 
--- "내 휴대폰으로 보내기" on the arrival screen (L6). A trip stacked into a folder whose batch is already
--- requested passes on the batch instead.
+-- "내 휴대폰으로 보내기" on the invite screen (L2/P2) sends the invite; on the arrival screen (L6) the
+-- settlement. A trip stacked into a folder whose batch is already requested passes on the batch instead.
 create or replace function public.queue_trip_share(p_code text, p_admin_secret text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
+  if t.status in ('preparing', 'in_progress') then
+    delete from public.share_requests where trip_id = t.id;
+    insert into public.share_requests (trip_id, kind) values (t.id, 'invite');
+    return jsonb_build_object('kind', 'invite');
+  end if;
   if t.status <> 'settled' then raise exception 'not_settled'; end if;
   if t.settle_mode is null then raise exception 'not_chosen'; end if;
   if t.settle_mode = 'folder' and (select status from public.folder_batches where id = t.batch_id) = 'requested' then

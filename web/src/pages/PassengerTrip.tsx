@@ -202,9 +202,14 @@ function Join({
       </Button>
 
       {onVerify && (
-        <button type="button" onClick={onVerify} className="t-caption text-sub underline underline-offset-2">
-          다른 휴대폰에서 이미 참여했나요?
-        </button>
+        <>
+          <button type="button" onClick={onVerify} className="t-caption text-sub underline underline-offset-2">
+            다른 휴대폰에서 이미 참여했나요?
+          </button>
+          <button type="button" onClick={onVerify} className="t-caption text-sub underline underline-offset-2">
+            {trip.driver_name}님이라면 여기서 초대를 공유할 수 있어요
+          </button>
+        </>
       )}
       {editing && (
         <>
@@ -263,7 +268,7 @@ function Verify({
         <div className="flex flex-col gap-1">
           <h1 className="t-title">이 운행에 참여한 사람인가요?</h1>
           <p className="t-body text-sub">처음 참여한 휴대폰이 아니라서 한 번 확인할게요</p>
-          <p className="t-caption text-faint">{trip.driver_name}님이라면 차 화면에 넣은 이름과 번호 뒤 4자리로 보낼 정산을 볼 수 있어요</p>
+          <p className="t-caption text-faint">{trip.driver_name}님이라면 차 화면에 넣은 이름과 번호 뒤 4자리로 보낼 초대와 정산을 볼 수 있어요</p>
         </div>
         <Field label="이름">
           <TextInput value={name} onChange={setName} />

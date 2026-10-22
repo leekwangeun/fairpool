@@ -563,6 +563,14 @@ test('driver info from the car opens a read-only "내 휴대폰으로 보내기"
   await rpc(db, 'join_trip', { p_code: trip.code, p_device_key: device(1), p_name: '민지', p_phone4: '1111' });
   await rpc(db, 'join_trip', { p_code: trip.code, p_device_key: device(2), p_name: '서연', p_phone4: '2222' });
   const ps = (await rpc(db, 'get_trip_admin', { p_code: trip.code, p_admin_secret: car.vehicle_secret })).passengers;
+  // the invite screen (L2/P2) sends the invite before the trip ends
+  const asDriver = (code, phone4 = '7890') =>
+    rpc(db, 'verify_device', { p_code: code, p_device_key: device(9), p_name: '지훈', p_phone4: phone4 });
+  assert.equal((await rpc(db, 'queue_trip_share', { p_code: trip.code, p_admin_secret: car.vehicle_secret })).kind, 'invite');
+  const invite = (await asDriver(trip.code)).driver_view.cards;
+  assert.deepEqual(invite.map((c) => [c.kind, c.code, c.seats_left]), [['invite', trip.code, 2]]);
+  assert.deepEqual(invite[0].people.map((p) => p.name), ['민지', '서연']);
+  assert.equal(JSON.stringify(invite).includes('연희동'), false, 'no stops on the invite card');
   await rpc(db, 'post_settlement', { p_code: trip.code, p_admin_secret: trip.admin_secret, p_payload: {
     total: 15730, shares: [{ passenger_id: ps[0].id, name: '민지', amount: 3990, from: '창천동', to: '연희동' },
                            { passenger_id: ps[1].id, name: '서연', amount: 4700, from: '창천동', to: '망원동' },
@@ -570,8 +578,6 @@ test('driver info from the car opens a read-only "내 휴대폰으로 보내기"
   await assert.rejects(rpc(db, 'queue_trip_share', { p_code: trip.code, p_admin_secret: car.vehicle_secret }), /not_chosen/);
   await rpc(db, 'choose_settlement', { p_code: trip.code, p_admin_secret: car.vehicle_secret, p_mode: 'direct' });
 
-  const asDriver = (code, phone4 = '7890') =>
-    rpc(db, 'verify_device', { p_code: code, p_device_key: device(9), p_name: '지훈', p_phone4: phone4 });
   let res = await asDriver(trip.code);
   assert.deepEqual(res.driver_view.cards, [], 'nothing until the car sends it');
   assert.equal((await asDriver(trip.code, '0000')).error, 'verify_failed');

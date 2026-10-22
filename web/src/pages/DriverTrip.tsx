@@ -481,9 +481,9 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
           </Button>
         </>
       )}
-      {settled && trip.settle_mode && (
+      {(!settled || trip.settle_mode) && (
         <Button variant="secondary" onClick={() => run(sendToMyPhone)}>
-          차에서 '내 휴대폰으로 보내기' 누르기
+          차에서 '내 휴대폰으로 보내기' 누르기 ({settled ? '정산' : '초대'})
         </Button>
       )}
       {store.driverSecret() && (

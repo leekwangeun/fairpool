@@ -207,14 +207,17 @@ export type SettlePage = {
 // "내 휴대폰으로 보내기" from the car: a settlement the driver passes on from their own phone after
 // the driver's name and last 4 digits on M1-1 or the settlement page. Read-only.
 export type ShareCard = {
-  kind: 'trip' | 'batch';
+  kind: 'invite' | 'trip' | 'batch';
   code: string;
   title: string;
   date: string;
   settle_mode?: SettleMode | null;
   folder?: string | null;
+  origin?: string | null;
+  seats?: number;
+  seats_left?: number;
   total: number | null;
-  people: { name: string; amount: number; from?: string | null; to?: string | null; trips?: number; paid: boolean }[];
+  people: { name: string; amount: number | null; from?: string | null; to?: string | null; trips?: number; paid: boolean }[];
   rides?: { title: string; date: string; shares: { name: string; amount: number; from?: string | null; to?: string | null }[] }[];
   bank: Bank | null;
 };
