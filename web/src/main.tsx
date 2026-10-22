@@ -8,7 +8,6 @@ import DriverTrip from './pages/DriverTrip';
 import PassengerTrip from './pages/PassengerTrip';
 import CarpoolLink from './pages/CarpoolLink';
 import VehicleLink from './pages/VehicleLink';
-import Settings from './pages/Settings';
 import FolderAdmin from './pages/FolderAdmin';
 import SettlePage from './pages/SettlePage';
 import HowItWorks from './pages/HowItWorks';
@@ -26,7 +25,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <Route path="/link/:code" element={<VehicleLink />} />
         <Route path="/f/:code" element={<FolderAdmin />} />
         <Route path="/s/:code" element={<SettlePage />} />
-        <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </BrowserRouter>

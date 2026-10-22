@@ -143,12 +143,6 @@ function Join({
     }
   }
 
-  async function leave() {
-    if (!window.confirm('이 운행에서 빠질까요?')) return;
-    await rpc('leave_trip', { p_code: trip.code, p_device_key: deviceKey });
-    window.location.reload();
-  }
-
   return (
     <Page>
       <Card className="gap-1.5">
@@ -208,16 +202,12 @@ function Join({
         </button>
       )}
       {editing && (
-        <div className="flex gap-2.5">
+        <>
           <Button variant="secondary" onClick={onCancel}>
             취소
           </Button>
-          {trip.status === 'preparing' && (
-            <Button variant="danger" onClick={leave}>
-              빠지기
-            </Button>
-          )}
-        </div>
+          <p className="t-caption text-center text-faint">이 운행에서 빠지려면 {trip.driver_name}님에게 말해 주세요</p>
+        </>
       )}
     </Page>
   );

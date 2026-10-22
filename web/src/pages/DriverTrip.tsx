@@ -143,6 +143,16 @@ export default function DriverTrip() {
                       : `${p.pickup?.label ?? '출발지에서 탑승'} → ${p.dropoff?.label ?? '내릴 곳 미정'}`}
                 </p>
               </div>
+              {live && !p.boarded_at && (
+                <button
+                  type="button"
+                  onClick={() => run(() => rpc('remove_passenger', { p_code: code, p_admin_secret: secret, p_passenger_id: p.id }))}
+                  aria-label={`${p.name} 님을 운행에서 빼기`}
+                  className="t-strong shrink-0 px-1 text-faint"
+                >
+                  ×
+                </button>
+              )}
               {canRemovePlace && (
                 <button type="button" onClick={() => removePlace(p.id, p.name)} className="t-caption shrink-0 rounded-lg border border-line bg-card px-2.5 py-1.5 text-sub">
                   장소 지우기
@@ -420,6 +430,19 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
     });
   }
 
+  // the account is entered only on the car (L1-9): link a stand-in car to this driver and save a sample
+  async function addBankFromCar() {
+    const car = await rpc<{ vehicle_secret: string; link_code: string }>('create_vehicle_link', {});
+    await rpc('claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: store.driverSecret() });
+    await rpc('set_bank_account', {
+      p_vehicle_secret: car.vehicle_secret,
+      p_consent: true,
+      p_bank_name: '카카오뱅크',
+      p_bank_account: '3333-01-2345678',
+      p_account_holder: '운전자',
+    });
+  }
+
   return (
     <Card className="gap-2.5">
       <h2 className="t-strong">시연 도구</h2>
@@ -433,6 +456,11 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
       <Button variant="secondary" onClick={settle} disabled={ps.length === 0}>
         정산 결과 보내기
       </Button>
+      {store.driverSecret() && (
+        <Button variant="secondary" onClick={() => run(addBankFromCar)}>
+          차 화면에서 받을 계좌 넣기
+        </Button>
+      )}
     </Card>
   );
 }

@@ -65,12 +65,23 @@ test('admin view needs the secret', async () => {
 
 test('bank account is shown only while a rider\'s settlement is in progress, and only with consent', async () => {
   const db = await freshDb();
-  const { driver_secret } = await rpc(db, 'create_driver', { p_display_name: '지훈' });
-  await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_name: '페어은행',
-                                   p_bank_account: '000-0000-0000', p_account_holder: '지훈', p_bank_consent: true });
-  const stored = (await db.query('select bank_account from public.drivers')).rows[0].bank_account;
+  // the account is entered only on the car (L1-9), even before a driver links it
+  const car = await rpc(db, 'create_vehicle_link', {});
+  await assert.rejects(rpc(db, 'set_bank_account', { p_vehicle_secret: car.vehicle_secret, p_consent: null,
+                                                     p_bank_name: '페어은행', p_bank_account: '000-0000-0000',
+                                                     p_account_holder: '지훈' }), /consent_required/);
+  await rpc(db, 'set_bank_account', { p_vehicle_secret: car.vehicle_secret, p_consent: true, p_bank_name: '페어은행',
+                                      p_bank_account: '000-0000-0000', p_account_holder: '지훈' });
+  const stored = (await db.query('select bank_account from public.drivers where bank_account is not null')).rows[0].bank_account;
   assert.ok(!Buffer.from(stored).toString('latin1').includes('000-0000-0000'), 'the account is stored encrypted');
-  assert.equal((await rpc(db, 'get_driver', { p_driver_secret: driver_secret })).bank.account, '000-0000-0000');
+  // linking the car keeps the account with the driver; the driver web neither sees nor edits it
+  const { driver_secret } = await rpc(db, 'create_driver', { p_display_name: '지훈' });
+  await rpc(db, 'claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: driver_secret });
+  assert.equal((await rpc(db, 'get_bank_account', { p_vehicle_secret: car.vehicle_secret })).account, '000-0000-0000');
+  assert.equal((await rpc(db, 'get_driver', { p_driver_secret: driver_secret })).bank, undefined);
+  await assert.rejects(rpc(db, 'set_bank_account', { p_vehicle_secret: driver_secret, p_consent: true,
+                                                     p_bank_name: 'x', p_bank_account: '1', p_account_holder: 'x' }),
+                       /not_allowed/, 'a driver secret is not a car');
 
   const { code, admin_secret } = await rpc(db, 'create_trip', { p_title: 'MT', p_driver_secret: driver_secret });
   await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지' });
@@ -107,17 +118,20 @@ test('bank account is shown only while a rider\'s settlement is in progress, and
 
   await rpc(db, 'mark_paid', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji, p_paid: false });
   assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) })).bank.account, '000-0000-0000');
-  await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_consent: false });
+  await rpc(db, 'set_bank_account', { p_vehicle_secret: car.vehicle_secret, p_consent: false });
   view = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) });
-  assert.equal(view.bank, null, 'withdrawing consent removes the account');
+  assert.equal(view.bank, null, '계좌 지우기 removes the account at once');
+  assert.equal(await rpc(db, 'get_bank_account', { p_vehicle_secret: car.vehicle_secret }), null);
   await assert.rejects(rpc(db, 'join_trip', { p_code: code, p_device_key: device(3), p_name: '늦은 사람' }), /trip_closed/);
 });
 
 test('carpool folder stacks trips and settles them together', async () => {
   const db = await freshDb();
   const { driver_secret } = await rpc(db, 'create_driver', { p_display_name: '지훈' });
-  await rpc(db, 'update_driver', { p_driver_secret: driver_secret, p_bank_name: '페어은행',
-                                   p_bank_account: '111-222', p_account_holder: '지훈', p_bank_consent: true });
+  const car = await rpc(db, 'create_vehicle_link', {});
+  await rpc(db, 'claim_vehicle_link', { p_link_code: car.link_code, p_driver_secret: driver_secret });
+  await rpc(db, 'set_bank_account', { p_vehicle_secret: car.vehicle_secret, p_consent: true, p_bank_name: '페어은행',
+                                      p_bank_account: '111-222', p_account_holder: '지훈' });
   const first = await rpc(db, 'create_trip', { p_title: '출근', p_driver_secret: driver_secret });
   await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(1), p_name: '수진', p_phone4: '1111' });
   await rpc(db, 'join_trip', { p_code: first.code, p_device_key: device(2), p_name: '도윤', p_phone4: '2222' });
@@ -409,13 +423,26 @@ test('a trip made on the car screen hands the passengers\' stops back to the car
   assert.equal(again.passengers.length, 1);
 });
 
-test('a full car refuses new passengers but lets members edit', async () => {
+test('a full car refuses new passengers, and only the driver takes someone off before boarding', async () => {
   const db = await freshDb();
-  const { code } = await rpc(db, 'create_trip', { p_title: 't', p_seats: 1 });
+  const { code, admin_secret } = await rpc(db, 'create_trip', { p_title: 't', p_seats: 1 });
   await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지' });
   await assert.rejects(rpc(db, 'join_trip', { p_code: code, p_device_key: device(2), p_name: '서연' }), /trip_full/);
   const v = await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지', p_dropoff: place('집') });
   assert.equal(v.seats_left, 0);
+
+  // a passenger who drops out tells the driver; the driver takes them off and the seat opens
+  const minji = (await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret })).passengers[0].id;
+  const admin = await rpc(db, 'remove_passenger', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: minji });
+  assert.equal(admin.passengers.length, 0);
+  await rpc(db, 'join_trip', { p_code: code, p_device_key: device(2), p_name: '서연' });
+  // after boarding the passenger is part of the ride record
+  const seoyeon = (await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret })).passengers[0].id;
+  await rpc(db, 'mark_passenger', { p_code: code, p_admin_secret: admin_secret, p_passenger_id: seoyeon, p_boarded: true });
+  await assert.rejects(rpc(db, 'remove_passenger', { p_code: code, p_admin_secret: admin_secret,
+                                                     p_passenger_id: seoyeon }), /record_locked/);
+  await assert.rejects(rpc(db, 'remove_passenger', { p_code: code, p_admin_secret: 'passenger', p_passenger_id: seoyeon }),
+                       /not_allowed/);
 });
 
 test('records are corrected, never deleted: removing my place during a trip and a re-settlement', async () => {

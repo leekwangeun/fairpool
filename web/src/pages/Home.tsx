@@ -72,6 +72,12 @@ export default function Home() {
     }
   }
 
+  function forget() {
+    if (!window.confirm('이 휴대폰에서 운전자 정보를 지울까요? 만든 운행을 다시 관리할 수 없게 돼요.')) return;
+    store.setDriverSecret(null);
+    setDriver(null);
+  }
+
   if (loading) return <Page>{null}</Page>;
 
   if (!driver) {
@@ -103,17 +109,12 @@ export default function Home() {
 
   return (
     <Page>
-      <div className="flex items-end justify-between gap-3 pt-2">
-        <h1 className="text-2xl font-bold">
-          <button type="button" onClick={rename} className="text-left">
-            {driver.display_name}님
-          </button>
-          , 어디로 갈까요?
-        </h1>
-        <Link to="/settings" className="shrink-0 text-sm text-sub underline-offset-2 hover:underline">
-          받을 계좌
-        </Link>
-      </div>
+      <h1 className="pt-2 text-2xl font-bold">
+        <button type="button" onClick={rename} className="text-left">
+          {driver.display_name}님
+        </button>
+        , 어디로 갈까요?
+      </h1>
 
       <Button onClick={() => navigate('/new')}>새 운행 만들기</Button>
       <ErrorText error={error} />
@@ -181,8 +182,12 @@ export default function Home() {
       <p className="px-1 text-sm text-sub">
         {driver.vehicles > 0
           ? '차와 연결돼 있어요. 시동을 켜면 여기서 만든 운행이 차 화면에 떠요.'
-          : '차 화면의 연결 QR을 찍으면, 여기서 만든 운행을 차에서 바로 불러올 수 있어요.'}
+          : '차 화면의 연결 QR을 찍으면, 여기서 만든 운행을 차에서 바로 불러올 수 있어요.'}{' '}
+        정산 받을 계좌는 주차 중 차 화면에서 등록해요.
       </p>
+      <button type="button" onClick={forget} className="t-caption text-sub underline underline-offset-2">
+        이 휴대폰에서 운전자 정보 지우기
+      </button>
     </Page>
   );
 }

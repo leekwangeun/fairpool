@@ -262,7 +262,6 @@ export type AdminTrip = {
 
 export type Driver = {
   display_name: string;
-  bank: Bank | null;
   carpools: { code: string; title: string; members: CarpoolMember[] }[];
   trips: { code: string; title: string; status: TripStatus; created_at: string }[];
   vehicles: number;

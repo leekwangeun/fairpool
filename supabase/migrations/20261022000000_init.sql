@@ -59,6 +59,7 @@ create table public.drivers (
   bank_account    bytea,                 -- encrypted with _enc
   account_holder  bytea,                 -- encrypted with _enc
   bank_consent_at timestamptz,          -- shown only to passengers whose settlement is in progress
+  car_only        boolean not null default false,  -- made by an unlinked car to hold its account (L1-9)
   created_at      timestamptz not null default now()
 );
 
@@ -370,8 +371,6 @@ begin
   if d.id is null then raise exception 'not_allowed'; end if;
   return jsonb_build_object(
     'display_name', d.display_name,
-    'bank', case when d.bank_consent_at is null then null else jsonb_build_object(
-      'bank_name', d.bank_name, 'account', public._dec(d.bank_account), 'holder', public._dec(d.account_holder)) end,
     'carpools', (select coalesce(jsonb_agg(jsonb_build_object('code', c.code, 'title', c.title,
                    'members', public._carpool_members(c.id))
                    order by c.created_at desc), '[]'::jsonb)
@@ -384,30 +383,63 @@ begin
     'vehicles', (select count(*) from public.vehicles v where v.driver_id = d.id and v.revoked_at is null));
 end $$;
 
--- Passing p_bank_consent = false removes the stored account.
-create or replace function public.update_driver(
-  p_driver_secret text,
-  p_display_name text default null,
-  p_bank_name text default null,
-  p_bank_account text default null,
-  p_account_holder text default null,
-  p_bank_consent boolean default null
-) returns jsonb
+create or replace function public.update_driver(p_driver_secret text, p_display_name text default null) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare d public.drivers := public._driver(p_driver_secret);
 begin
   if d.id is null then raise exception 'not_allowed'; end if;
-  update public.drivers set
-    display_name    = coalesce(nullif(trim(p_display_name), ''), display_name),
-    bank_name       = case when p_bank_consent is false then null else coalesce(p_bank_name, bank_name) end,
-    bank_account    = case when p_bank_consent is false then null
-                           when p_bank_account is not null then public._enc(p_bank_account) else bank_account end,
-    account_holder  = case when p_bank_consent is false then null
-                           when p_account_holder is not null then public._enc(p_account_holder) else account_holder end,
-    bank_consent_at = case when p_bank_consent is true then coalesce(bank_consent_at, now())
-                           when p_bank_consent is false then null else bank_consent_at end
-  where id = d.id;
+  update public.drivers set display_name = coalesce(nullif(trim(p_display_name), ''), display_name) where id = d.id;
   return public.get_driver(p_driver_secret);
+end $$;
+
+-- 정산 받을 계좌 (car screen L1-9): entered only on the car while parked, never on the web. The account
+-- belongs to the car's driver; a car not linked yet gets a driver of its own to hold it.
+create or replace function public.get_bank_account(p_vehicle_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v public.vehicles := public._vehicle(p_vehicle_secret);
+  d public.drivers;
+begin
+  if v.id is null then raise exception 'not_allowed'; end if;
+  select * into d from public.drivers where id = v.driver_id;
+  return case when d.bank_consent_at is null then null else jsonb_build_object(
+    'bank_name', d.bank_name, 'account', public._dec(d.bank_account), 'holder', public._dec(d.account_holder)) end;
+end $$;
+
+-- 저장하기 needs the [필수] consent (p_consent true); 계좌 지우기 (p_consent false) deletes it at once.
+create or replace function public.set_bank_account(
+  p_vehicle_secret text,
+  p_consent boolean,
+  p_bank_name text default null,
+  p_bank_account text default null,
+  p_account_holder text default null
+) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v public.vehicles := public._vehicle(p_vehicle_secret);
+  did uuid;
+begin
+  if v.id is null then raise exception 'not_allowed'; end if;
+  did := v.driver_id;
+  if p_consent is false then
+    update public.drivers set bank_name = null, bank_account = null, account_holder = null, bank_consent_at = null
+    where id = did;
+    return null;
+  end if;
+  if p_consent is not true then raise exception 'consent_required'; end if;
+  if nullif(trim(p_bank_name), '') is null or nullif(trim(p_bank_account), '') is null
+     or nullif(trim(p_account_holder), '') is null then
+    raise exception 'bank_incomplete';
+  end if;
+  if did is null then
+    insert into public.drivers (secret_hash, car_only) values (public._hash(public._secret()), true) returning id into did;
+    update public.vehicles set driver_id = did where id = v.id;
+  end if;
+  update public.drivers set
+    bank_name = trim(p_bank_name), bank_account = public._enc(trim(p_bank_account)),
+    account_holder = public._enc(trim(p_account_holder)), bank_consent_at = coalesce(bank_consent_at, now())
+  where id = did;
+  return public.get_bank_account(p_vehicle_secret);
 end $$;
 
 -- ---------------------------------------------------------------- trips
@@ -561,17 +593,6 @@ begin
   return public.get_trip(p_code, p_device_key);
 end $$;
 
-create or replace function public.leave_trip(p_code text, p_device_key text) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare t public.trips;
-begin
-  select * into t from public.trips where code = upper(p_code);
-  if t.id is null then raise exception 'trip_not_found'; end if;
-  if t.status <> 'preparing' then raise exception 'trip_started'; end if;
-  delete from public.trip_passengers where trip_id = t.id and device_key_hash = public._hash(p_device_key);
-  return jsonb_build_object('ok', true);
-end $$;
-
 create or replace function public.report_issue(p_code text, p_device_key text, p_message text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
@@ -630,6 +651,25 @@ end $$;
 -- Before boarding is recorded: the place leaves the stops (the car asks NaviHelper for the whole route
 -- again with requestRouteWithWaypoints) and the place kept for the favourite goes too. After boarding
 -- the place is part of the ride record and can only be corrected until the settlement is complete.
+-- A passenger who drops out tells the driver, and the driver takes them off the trip (driver page, or the
+-- x on the car's invitation screen L2/P2). Only before boarding is recorded; their stops leave the route,
+-- so the car asks NaviHelper for the whole route again.
+create or replace function public.remove_passenger(p_code text, p_admin_secret text, p_passenger_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  t public.trips := public._trip_admin(p_code, p_admin_secret);
+  p public.trip_passengers;
+begin
+  select * into p from public.trip_passengers where id = p_passenger_id and trip_id = t.id;
+  if p.id is null then raise exception 'not_allowed'; end if;
+  if p.boarded_at is not null or t.status not in ('preparing', 'in_progress') then
+    raise exception 'record_locked';
+  end if;
+  delete from public.trip_passengers where id = p.id;
+  return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
 create or replace function public.remove_passenger_place(p_code text, p_admin_secret text, p_passenger_id uuid)
 returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
@@ -1281,14 +1321,33 @@ begin
                             'expires_at', v.link_expires_at);
 end $$;
 
+-- If the car had been holding its own account and trips (a car-only driver), they move to the driver
+-- who links it; the account is kept unless that driver already has one.
 create or replace function public.claim_vehicle_link(p_link_code text, p_driver_secret text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
-declare d public.drivers := public._driver(p_driver_secret);
+declare
+  d public.drivers := public._driver(p_driver_secret);
+  v public.vehicles;
+  old public.drivers;
 begin
   if d.id is null then raise exception 'not_allowed'; end if;
-  update public.vehicles set driver_id = d.id, link_code = null, link_expires_at = null
+  select * into v from public.vehicles
   where link_code = upper(p_link_code) and link_expires_at > now() and revoked_at is null;
-  if not found then raise exception 'link_expired'; end if;
+  if v.id is null then raise exception 'link_expired'; end if;
+  select * into old from public.drivers where id = v.driver_id and car_only;
+  update public.vehicles set driver_id = d.id, link_code = null, link_expires_at = null where id = v.id;
+  if old.id is not null then
+    if d.bank_consent_at is null and old.bank_consent_at is not null then
+      update public.drivers set bank_name = old.bank_name, bank_account = old.bank_account,
+        account_holder = old.account_holder, bank_consent_at = old.bank_consent_at
+      where id = d.id;
+    end if;
+    update public.trips set driver_id = d.id where driver_id = old.id;
+    update public.folders set driver_id = d.id where driver_id = old.id;
+    update public.carpools set driver_id = d.id where driver_id = old.id;
+    update public.vehicles set driver_id = d.id where driver_id = old.id;
+    delete from public.drivers where id = old.id;
+  end if;
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -1348,7 +1407,8 @@ declare
   fn text;
   api text[] := array[
     'create_driver', 'update_driver', 'get_driver',
-    'create_trip', 'get_trip', 'join_trip', 'verify_device', 'leave_trip', 'report_issue', 'remove_passenger_place', 'delete_ride_record',
+    'create_trip', 'get_trip', 'join_trip', 'verify_device', 'report_issue', 'remove_passenger', 'remove_passenger_place', 'delete_ride_record',
+    'get_bank_account', 'set_bank_account',
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
     'get_trip_admin', 'set_trip_status', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
