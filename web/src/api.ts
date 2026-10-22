@@ -154,6 +154,8 @@ export type PublicTrip = {
   // false once the trip has started, unless the car shows the invite QR again at a stop
   joinable: boolean;
   driver_name: string;
+  // made from a favourite (anyone may know); the favourite's link itself only for members
+  favourite: boolean;
   carpool_code: string | null;
   passengers: { name: string; is_me: boolean; boarded: boolean; alighted: boolean }[];
   me: {

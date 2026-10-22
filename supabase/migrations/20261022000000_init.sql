@@ -129,8 +129,8 @@ create table public.carpools (
   archived_at    timestamptz
 );
 
--- Stops of a saved carpool are kept for its next trip; a member can remove them any time
--- ("내 장소 지우기", save_place = false). One-off trips keep nothing.
+-- Stops of a saved carpool are kept for its next trip. Only the driver removes them (favourites x,
+-- remove_member_place). One-off trips keep nothing.
 create table public.carpool_members (
   id              uuid primary key default gen_random_uuid(),
   carpool_id      uuid not null references public.carpools(id) on delete cascade,
@@ -183,7 +183,7 @@ create table public.trip_passengers (
   -- name + last 4 digits hashed per driver (or car), so the same person on a new phone is still one
   -- person in a carpool folder and in a favourite
   person_hash     text,
-  save_place      boolean not null default true,  -- false after "내 장소 지우기"
+  save_place      boolean not null default true,  -- false once the driver removed this place
   estimate        numeric,               -- expected share posted by the car while driving
   seat            text,
   joined_at       timestamptz not null default now(),
@@ -314,7 +314,8 @@ begin
     return t;
   end if;
   v := public._vehicle(p_secret);
-  if v.id is not null and (v.id = t.vehicle_id or (t.driver_id is not null and v.driver_id = t.driver_id)) then
+  if v.id is not null and ((t.driver_id is not null and v.driver_id = t.driver_id)
+                           or (t.driver_id is null and v.id = t.vehicle_id)) then
     return t;
   end if;
   raise exception 'not_allowed';
@@ -352,6 +353,8 @@ language sql stable set search_path = public, extensions as $$
           where scope = p_scope and device_key_hash = p_device_hash and failed_at > now() - interval '1 hour') >= 5
       or (select count(*) from public.verify_attempts
           where scope = p_scope and failed_at > now() - interval '1 hour') >= 30
+      or (select count(*) from public.verify_attempts
+          where scope = p_scope and failed_at > now() - interval '1 day') >= 100
 $$;
 
 -- 정산 완료 for one passenger: 바로 정산 marked paid, or their part of a requested folder batch paid.
@@ -406,13 +409,16 @@ language sql stable set search_path = public, extensions as $$
   end
 $$;
 
--- Settlement as one passenger sees it: everyone's amount, "is_me" on their own row, no ids.
+-- Settlement as one passenger sees it: everyone's amount, "is_me" on their own row, no ids, and where
+-- others got on and off left out.
 create or replace function public._settlement_for(p jsonb, me public.trip_passengers) returns jsonb
 language sql stable set search_path = public, extensions as $$
   select case when p is null then null else
     (p - 'shares') || jsonb_build_object('shares', (
-      select coalesce(jsonb_agg((s - 'passenger_id') || jsonb_build_object(
-               'is_me', coalesce(me.id is not null and s ->> 'passenger_id' = me.id::text, false))
+      select coalesce(jsonb_agg(
+               case when me.id is not null and s ->> 'passenger_id' = me.id::text
+                    then (s - 'passenger_id') || jsonb_build_object('is_me', true)
+                    else (s - 'passenger_id' - 'from' - 'to' - 'km') || jsonb_build_object('is_me', false) end
              order by ord), '[]'::jsonb)
       from jsonb_array_elements(p -> 'shares') with ordinality as x(s, ord)))
   end
@@ -581,7 +587,7 @@ begin
   if p_vehicle_secret is not null and v.id is null then raise exception 'not_allowed'; end if;
   insert into public.trips (code, admin_hash, driver_id, vehicle_id, title, origin, destination,
                             include_driver, seats, rule)
-  values (public._new_trip_code(), public._hash(s), coalesce(d.id, v.driver_id), v.id,
+  values (public._new_trip_code(), public._hash(s), coalesce(d.id, public._car_driver(v.id)), v.id,
           coalesce(nullif(trim(p_title), ''), '함께 가는 길'), p_origin, p_destination,
           coalesce(p_include_driver, true), coalesce(p_seats, 4), coalesce(p_rule, 'shapley'))
   returning * into t;
@@ -601,7 +607,7 @@ declare
 begin
   select * into t from public.trips where code = upper(p_code);
   if t.id is null then raise exception 'trip_not_found'; end if;
-  select * into d from public.drivers where id = t.driver_id;
+  d := public._owner(t.driver_id, t.vehicle_id);
   select * into me from public.trip_passengers
    where trip_id = t.id and p_device_key is not null and device_key_hash = public._hash(p_device_key);
   select * into s from public.settlements where trip_id = t.id;
@@ -617,7 +623,9 @@ begin
     'seats_left', greatest(t.seats - taken, 0),
     'joinable', t.status = 'preparing' or (t.status = 'in_progress' and coalesce(t.join_open_until > now(), false)),
     'driver_name', coalesce(d.display_name, '운전자'),
-    'carpool_code', (select code from public.carpools where id = t.carpool_id),
+    -- the favourite's stable link only for members; anyone may know that it is a favourite (M1 notice)
+    'favourite', t.carpool_id is not null,
+    'carpool_code', case when me.id is not null then (select code from public.carpools where id = t.carpool_id) end,
     'passengers', (select coalesce(jsonb_agg(jsonb_build_object(
                      'name', p.name, 'is_me', p.id = me.id,
                      'boarded', p.boarded_at is not null, 'alighted', p.alighted_at is not null)
@@ -630,7 +638,8 @@ begin
             'place_removed', me.place_removed_at is not null) end,
     'progress', public._progress_for(t.progress, me),
     -- folder trips have no settlement page of their own (each rider's part goes to the batch page)
-    'settlement', case when t.settle_mode = 'folder' then null else public._settlement_for(s.payload, me) end,
+    'settlement', case when t.settle_mode = 'folder' or me.id is null then null
+                       else public._settlement_for(s.payload, me) end,
     'settle_mode', t.settle_mode,
     'paid', me.paid_at is not null,
     'folder', public._folder_for(t, me),
@@ -640,6 +649,8 @@ begin
     -- the driver marks them paid. Folder trips show it only on the batch's settlement page.
     'bank', case when me.id is not null and d.bank_consent_at is not null
                    and t.status = 'settled' and t.settle_mode = 'direct' and me.paid_at is null
+                   and exists (select 1 from jsonb_array_elements(s.payload -> 'shares') x
+                               where x ->> 'passenger_id' = me.id::text)
               then jsonb_build_object('bank_name', d.bank_name, 'account', public._dec(d.bank_account),
                                       'holder', public._dec(d.account_holder)) end);
 end $$;
@@ -650,13 +661,13 @@ create or replace function public.join_trip(
   p_name text,
   p_pickup jsonb default null,
   p_dropoff jsonb default null,
-  p_phone4 text default null,
-  p_save_place boolean default null     -- null keeps the current choice (new members: kept)
+  p_phone4 text default null
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips;
   known boolean;
+  mine public.trip_passengers;
 begin
   if coalesce(length(p_device_key), 0) < 16 then raise exception 'bad_device_key'; end if;
   if nullif(trim(p_name), '') is null then raise exception 'name_required'; end if;
@@ -668,8 +679,10 @@ begin
   select * into t from public.trips where code = upper(p_code);
   if t.id is null then raise exception 'trip_not_found'; end if;
   if t.status not in ('preparing', 'in_progress') then raise exception 'trip_closed'; end if;
-  known := exists (select 1 from public.trip_passengers
-                   where trip_id = t.id and device_key_hash = public._hash(p_device_key));
+  select * into mine from public.trip_passengers where trip_id = t.id and device_key_hash = public._hash(p_device_key);
+  known := mine.id is not null;
+  -- once dropped off the ride is part of the record; corrections go through the car
+  if mine.alighted_at is not null then raise exception 'record_locked'; end if;
   -- after departure only members may edit; newcomers need the QR shown again at a stop
   if not known and t.status = 'in_progress' and coalesce(t.join_open_until < now(), true) then
     raise exception 'join_closed';
@@ -682,14 +695,15 @@ begin
   values (t.id, trim(p_name), p_pickup, p_dropoff, public._hash(p_device_key),
           case when p_phone4 ~ '^[0-9]{4}$' then public._hash(t.id::text || p_phone4) end,
           public._person_hash(coalesce(t.driver_id, t.vehicle_id, t.id), p_name, p_phone4),
-          coalesce(p_save_place, true))
+          true)
   on conflict (trip_id, device_key_hash) do update
     set name = excluded.name,
-        pickup = excluded.pickup,
+        -- after boarding the pickup is part of the record; the drop-off can still change
+        pickup = case when public.trip_passengers.boarded_at is not null then public.trip_passengers.pickup
+                      else excluded.pickup end,
         dropoff = coalesce(excluded.dropoff, public.trip_passengers.dropoff),
         phone4_hash = coalesce(excluded.phone4_hash, public.trip_passengers.phone4_hash),
-        person_hash = coalesce(excluded.person_hash, public.trip_passengers.person_hash),
-        save_place = coalesce(p_save_place, public.trip_passengers.save_place);
+        person_hash = coalesce(excluded.person_hash, public.trip_passengers.person_hash);
   return public.get_trip(p_code, p_device_key);
 end $$;
 
@@ -772,7 +786,7 @@ begin
                 cross join lateral (select public._batch_summary(o.id) as summary) sm
                 where f.archived_at is null
                   and ((t.driver_id is not null and f.driver_id = t.driver_id)
-                       or (t.vehicle_id is not null and f.vehicle_id = t.vehicle_id))),
+                       or (t.driver_id is null and t.vehicle_id is not null and f.vehicle_id = t.vehicle_id))),
     'suggested_folder', (select f.code from public.carpools c join public.folders f on f.id = c.folder_id
                          where c.id = t.carpool_id and f.archived_at is null),
     'revisions', (select coalesce(jsonb_agg(jsonb_build_object('total', r.payload -> 'total', 'reason', r.reason,
@@ -835,9 +849,11 @@ language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips := public._trip_admin(p_code, p_admin_secret);
   p public.trip_passengers;
+  pkey text;
   anon constant text := '기록을 지운 동승자';
 begin
   select * into p from public.trip_passengers where id = p_passenger_id and trip_id = t.id;
+  pkey := public._person_key(p);
   if p.id is null then raise exception 'not_allowed'; end if;
   if p.record_deleted_at is not null then return public.get_trip_admin(p_code, p_admin_secret); end if;
   if not public._settle_done(t, p) then raise exception 'settlement_not_done'; end if;
@@ -856,8 +872,13 @@ begin
   update public.trip_passengers set
     name = anon, pickup = null, dropoff = null, seat = null, boarded_at = null, alighted_at = null,
     phone4_hash = null, person_hash = null, save_place = false, record_deleted_at = now(),
-    device_key_hash = public._hash(id::text || ':deleted')
+    exact_stops = null, estimate = null, device_key_hash = public._hash(id::text || ':deleted')
   where id = p.id;
+  -- in a folder batch, the person's line loses the name once none of their rides in it is left
+  update public.batch_payments bp set name = anon
+  where bp.batch_id = t.batch_id and bp.person_key = pkey
+    and not exists (select 1 from public.trip_passengers q join public.trips t2 on t2.id = q.trip_id
+                    where t2.batch_id = t.batch_id and q.record_deleted_at is null and public._person_key(q) = pkey);
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
@@ -879,6 +900,10 @@ language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
   if p_status not in ('preparing', 'in_progress', 'cancelled') then raise exception 'bad_status'; end if;
+  -- settled and cancelled are final, and a started trip does not go back to preparing: going back would
+  -- reopen corrections and joins that the settlement locks
+  if t.status in ('settled', 'cancelled') then raise exception 'trip_closed'; end if;
+  if p_status = 'preparing' and t.status <> 'preparing' then raise exception 'bad_status'; end if;
   update public.trips set
     status = p_status,
     started_at = case when p_status = 'in_progress' then coalesce(started_at, now()) else started_at end,
@@ -895,6 +920,7 @@ create or replace function public.update_progress(p_code text, p_admin_secret te
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
+  if t.status not in ('preparing', 'in_progress') then raise exception 'trip_closed'; end if;
   update public.trips set progress = p_progress where id = t.id;
   if p_estimates is not null then
     update public.trip_passengers p set estimate = (e ->> 'amount')::numeric
@@ -920,12 +946,19 @@ create or replace function public.mark_passenger(
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
+  if t.status = 'cancelled' then raise exception 'trip_closed'; end if;
+  if t.batch_id is not null and (select status from public.folder_batches where id = t.batch_id) <> 'open' then
+    raise exception 'batch_locked';
+  end if;
   if public._settle_started(t) then raise exception 'settle_started'; end if;
+  -- false undoes a misrecognised event (확인 카드 "잘못 인식"); undoing boarding undoes the drop-off too
   update public.trip_passengers set
     seat = coalesce(p_seat, seat),
-    boarded_at = case when p_boarded is true then coalesce(boarded_at, now()) else boarded_at end,
-    alighted_at = case when p_alighted is true then coalesce(alighted_at, now()) else alighted_at end
-  where id = p_passenger_id and trip_id = t.id;
+    boarded_at = case when p_boarded is true then coalesce(boarded_at, now())
+                      when p_boarded is false then null else boarded_at end,
+    alighted_at = case when p_alighted is true then coalesce(alighted_at, now())
+                       when p_alighted is false or p_boarded is false then null else alighted_at end
+  where id = p_passenger_id and trip_id = t.id and record_deleted_at is null;
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
@@ -941,6 +974,15 @@ declare
   old public.settlements;
   clean jsonb := p_payload;
 begin
+  if t.status = 'cancelled' then raise exception 'trip_closed'; end if;
+  -- every share must belong to a passenger of this trip
+  if jsonb_typeof(p_payload -> 'shares') = 'array' and exists (
+       select 1 from jsonb_array_elements(p_payload -> 'shares') x
+       where x ->> 'passenger_id' is not null
+         and not exists (select 1 from public.trip_passengers q
+                         where q.trip_id = t.id and q.id::text = x ->> 'passenger_id')) then
+    raise exception 'bad_share';
+  end if;
   -- a deleted ride record stays without a name even if the car sends it again
   if jsonb_typeof(p_payload -> 'shares') = 'array' then
     clean := jsonb_set(p_payload, '{shares}', (
@@ -972,8 +1014,10 @@ begin
   update public.trip_passengers set exact_stops = jsonb_strip_nulls(jsonb_build_object('pickup', pickup, 'dropoff', dropoff))
   where trip_id = t.id and t.carpool_id is null and save_place and exact_stops is null
     and (pickup is not null or dropoff is not null);
-  -- precise positions are no longer needed: keep them only at neighbourhood level (about 1 km)
+  -- precise positions are no longer needed: keep them only at neighbourhood level (about 1 km); the
+  -- expected share is replaced by the settlement
   update public.trip_passengers set
+    estimate = null,
     pickup = case when pickup ? 'lat' then pickup || jsonb_build_object(
                'lat', round((pickup ->> 'lat')::numeric, 2), 'lng', round((pickup ->> 'lng')::numeric, 2)) else pickup end,
     dropoff = case when dropoff ? 'lat' then dropoff || jsonb_build_object(
@@ -995,7 +1039,8 @@ begin
   select * into f from public.folders where code = upper(p_code) and archived_at is null;
   if f.id is null then raise exception 'folder_not_found'; end if;
   if (d.id is not null and d.id = f.driver_id)
-     or (v.id is not null and (v.id = f.vehicle_id or (f.driver_id is not null and v.driver_id = f.driver_id))) then
+     or (v.id is not null and ((f.driver_id is not null and v.driver_id = f.driver_id)
+                               or (f.driver_id is null and v.id = f.vehicle_id))) then
     return f;
   end if;
   raise exception 'not_allowed';
@@ -1109,7 +1154,7 @@ begin
   select * into b from public.folder_batches where code = upper(p_code);
   if b.id is null then raise exception 'page_not_found'; end if;
   select * into f from public.folders where id = b.folder_id;
-  select * into d from public.drivers where id = f.driver_id;
+  d := public._owner(f.driver_id, f.vehicle_id);
   pay := public._payment_for(b.id, p_device_key);
   if pay.id is not null then
     select coalesce(jsonb_agg(jsonb_build_object(
@@ -1209,13 +1254,16 @@ begin
      and (select status from public.folder_batches where id = t.batch_id) <> 'open' then
     raise exception 'batch_locked';
   end if;
+  -- someone already paid under 바로 정산: switching would bill them again
+  if public._settle_started(t) then raise exception 'settle_started'; end if;
   if p_mode = 'direct' then
     update public.trips set settle_mode = 'direct', batch_id = null where id = t.id;
   elsif p_mode = 'folder' then
     if p_folder_code is not null then
       select * into f from public.folders
       where code = upper(p_folder_code) and archived_at is null
-        and ((t.driver_id is not null and driver_id = t.driver_id) or (t.vehicle_id is not null and vehicle_id = t.vehicle_id));
+        and ((t.driver_id is not null and driver_id = t.driver_id)
+             or (t.driver_id is null and t.vehicle_id is not null and vehicle_id = t.vehicle_id));
       if f.id is null then raise exception 'folder_not_found'; end if;
     elsif nullif(trim(p_new_folder), '') is not null then
       loop
@@ -1228,7 +1276,6 @@ begin
       raise exception 'folder_required';
     end if;
     update public.trips set settle_mode = 'folder', batch_id = public._open_batch(f.id) where id = t.id;
-    update public.trip_passengers set paid_at = null where trip_id = t.id;
     -- favourites remember their folder, so the next trip of this carpool has it pre-selected
     update public.carpools set folder_id = f.id where id = t.carpool_id;
   else
@@ -1276,7 +1323,8 @@ begin
     cross join lateral (select public._batch_summary(coalesce(r.id, o.id)) as summary) sm
     where f.archived_at is null
       and ((d.id is not null and f.driver_id = d.id)
-           or (v.id is not null and (f.vehicle_id = v.id or (v.driver_id is not null and f.driver_id = v.driver_id))))
+           or (v.id is not null and ((v.driver_id is not null and f.driver_id = v.driver_id)
+                                     or (f.driver_id is null and f.vehicle_id = v.id))))
   ) x);
 end $$;
 
@@ -1357,6 +1405,10 @@ begin
   select id into r from public.folder_batches where folder_id = f.id and status = 'requested'
   order by created_at desc limit 1;
   if r is null then raise exception 'no_request'; end if;
+  -- someone already paid this request; cancelling would erase that
+  if exists (select 1 from public.batch_payments where batch_id = r and paid_at is not null) then
+    raise exception 'settle_started';
+  end if;
   update public.trips set batch_id = r
   where batch_id in (select id from public.folder_batches where folder_id = f.id and status = 'open');
   delete from public.folder_batches where folder_id = f.id and status = 'open';
@@ -1637,8 +1689,11 @@ begin
                        'my_amount', coalesce(sum((sh ->> 'amount')::numeric), 0))
               from public.trips t
               join public.settlements s on s.trip_id = t.id
-              join public.trip_passengers p on p.trip_id = t.id
-                   and p_device_key is not null and p.device_key_hash = public._hash(p_device_key)
+              join public.trip_passengers p on p.trip_id = t.id and p_device_key is not null
+                   and (p.device_key_hash = public._hash(p_device_key)
+                        or p.person_hash in (select person_hash from public.trip_passengers
+                                             where device_key_hash = public._hash(p_device_key)
+                                               and person_hash is not null))
               cross join lateral jsonb_array_elements(s.payload -> 'shares') sh
               where t.carpool_id = c.id and t.status = 'settled'
                 and date_trunc('month', s.settled_at) = date_trunc('month', now())
@@ -1664,13 +1719,35 @@ begin
   return jsonb_build_object('code', c.code, 'members', public._carpool_members(c.id));
 end $$;
 
-create or replace function public.archive_carpool(p_carpool_code text, p_driver_secret text) returns jsonb
+-- Removing a favourite (driver's phone or a car linked to the driver): its kept places go with it.
+create or replace function public.archive_carpool(p_carpool_code text, p_secret text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
-declare d public.drivers := public._driver(p_driver_secret);
+declare
+  d public.drivers := public._driver(p_secret);
+  v public.vehicles := public._vehicle(p_secret);
+  c public.carpools;
 begin
-  update public.carpools set archived_at = now()
-  where code = upper(p_carpool_code) and driver_id = d.id;
-  return jsonb_build_object('ok', found);
+  select * into c from public.carpools where code = upper(p_carpool_code) and archived_at is null;
+  if c.id is null then raise exception 'carpool_not_found'; end if;
+  if not (coalesce(d.id = c.driver_id, false) or coalesce(v.driver_id = c.driver_id, false)) then
+    raise exception 'not_allowed';
+  end if;
+  update public.carpool_members set pickup = null, dropoff = null where carpool_id = c.id;
+  update public.carpools set archived_at = now() where id = c.id;
+  return jsonb_build_object('ok', true);
+end $$;
+
+-- Removing a carpool folder once nothing in it is being settled; settled records stay.
+create or replace function public.archive_folder(p_folder_code text, p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare f public.folders := public._folder_admin(p_folder_code, p_secret);
+begin
+  if exists (select 1 from public.folder_batches where folder_id = f.id and status = 'requested') then
+    raise exception 'batch_in_progress';
+  end if;
+  update public.folders set archived_at = now() where id = f.id;
+  update public.carpools set folder_id = null where folder_id = f.id;
+  return jsonb_build_object('ok', true);
 end $$;
 
 -- ---------------------------------------------------------------- vehicle link
@@ -1732,6 +1809,8 @@ begin
     update public.vehicles set driver_id = d.id where driver_id = old.id;
     delete from public.drivers where id = old.id;
   end if;
+  update public.trips set driver_id = d.id where driver_id is null and vehicle_id = v.id;
+  update public.folders set driver_id = d.id where driver_id is null and vehicle_id = v.id;
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -1776,9 +1855,13 @@ begin
   update public.trips set progress = null
   where ended_at < now() - interval '24 hours' and progress is not null;
   update public.trips set status = 'cancelled', ended_at = now()
-  where status = 'preparing' and created_at < now() - interval '7 days';
+  where (status = 'preparing' and created_at < now() - interval '7 days')
+     or (status = 'in_progress' and coalesce(started_at, created_at) < now() - interval '7 days');
   get diagnostics n_old = row_count;
-  delete from public.verify_attempts where failed_at < now() - interval '1 day';
+  -- the car position of a trip still running after a day is no longer needed
+  update public.trips set progress = null
+  where status = 'in_progress' and progress is not null and coalesce(started_at, created_at) < now() - interval '24 hours';
+  delete from public.verify_attempts where failed_at < now() - interval '2 days';
   return jsonb_build_object('cleared_locations', n_loc, 'expired_trips', n_old);
 end $$;
 
@@ -1799,7 +1882,7 @@ declare
     'get_trip_admin', 'set_trip_status', 'set_join_open', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
     'cancel_batch_request', 'mark_batch_paid',
-    'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool',
+    'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool', 'archive_folder',
     'create_vehicle_link', 'claim_vehicle_link', 'get_vehicle_trips', 'revoke_vehicle'];
 begin
   if exists (select 1 from pg_roles where rolname = 'anon') then

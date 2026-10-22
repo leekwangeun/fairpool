@@ -208,9 +208,9 @@ function Join({
           <PlaceSearch value={dropoff} onChange={setDropoff} placeholder="어디서 내릴까요?" />
         </Field>
         <p className="t-caption text-faint">
-          {trip.carpool_code
-            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기에 저장되는 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 지우고 싶으면 운전자에게 말해 주세요'
-            : '정확한 위치는 운행이 끝나면 지워요. 운전자 차의 운행 기록에는 동 이름만 남아요'}
+          {trip.favourite
+            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 지우고 싶으면 운전자에게 말해 주세요'
+            : '정확한 위치는 운행이 끝나면 지워요. 운전자가 이 카풀을 즐겨찾기에 추가하면 다음 운행을 위해 탈 곳과 내릴 곳이 저장돼요'}
         </p>
       </Card>
 

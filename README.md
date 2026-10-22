@@ -24,7 +24,7 @@
 | 폴더 | 내용 |
 |---|---|
 | `supabase/migrations/` | DB 테이블과 서버 함수(SQL). 계정 없이 비밀값의 해시로 구분 |
-| `supabase/tests/` | 실제 마이그레이션을 PGlite(Node에서 도는 Postgres)로 돌리는 테스트 27개 |
+| `supabase/tests/` | 실제 마이그레이션을 PGlite(Node에서 도는 Postgres)로 돌리는 테스트 39개 |
 | `web/` | 휴대폰 웹 (React, TypeScript, Vite, Tailwind CSS, MapLibre) |
 | `docs/` | 서버 설계, 차량 앱 연동 방법 |
 
