@@ -193,6 +193,9 @@ create table public.trip_passengers (
   place_removed_at  timestamptz,         -- the driver removed this passenger's place before boarding
   record_deleted_at timestamptz,         -- the driver deleted this ride record after settlement
   exact_stops       jsonb,               -- exact stops kept for a day so the arrival screen can add a favourite
+  -- recorded by the car while nobody looked at the screen (L5-3); confirmed at the next stop or on L6-1
+  board_unchecked   boolean not null default false,
+  alight_unchecked  boolean not null default false,
   unique (trip_id, device_key_hash)
 );
 
@@ -227,8 +230,11 @@ create table public.trip_issues (
   id           uuid primary key default gen_random_uuid(),
   trip_id      uuid not null references public.trips(id) on delete cascade,
   passenger_id uuid references public.trip_passengers(id) on delete set null,
-  message      text not null,
-  created_at   timestamptz not null default now()
+  -- M3-1: 탄 곳이나 내린 곳 / 함께 탄 사람 / 금액 / 기타
+  kind         text not null default 'other' check (kind in ('place', 'people', 'amount', 'other')),
+  message      text,                     -- 남길 말 (optional)
+  created_at   timestamptz not null default now(),
+  resolved_at  timestamptz              -- the driver handled it on L1-8 (고칠 것 없어요, 기록 고치기)
 );
 
 -- "내 휴대폰으로 보내기" on the car: an invite or a settlement the driver wants to pass on from their own
@@ -378,7 +384,8 @@ language sql stable set search_path = public, extensions as $$
            'save_place', save_place, 'estimate', estimate, 'paid_at', paid_at,
            'place_removed_at', place_removed_at, 'record_deleted_at', record_deleted_at,
            'settle_done', (select public._settle_done(t, x) from public.trips t where t.id = x.trip_id),
-           'joined_at', joined_at, 'boarded_at', boarded_at, 'alighted_at', alighted_at)
+           'joined_at', joined_at, 'boarded_at', boarded_at, 'alighted_at', alighted_at,
+           'board_unchecked', board_unchecked, 'alight_unchecked', alight_unchecked)
          order by joined_at), '[]'::jsonb)
   from public.trip_passengers x where x.trip_id = p_trip
 $$;
@@ -743,7 +750,8 @@ begin
   return public.get_trip(p_code, p_device_key);
 end $$;
 
-create or replace function public.report_issue(p_code text, p_device_key text, p_message text) returns jsonb
+create or replace function public.report_issue(p_code text, p_device_key text, p_message text default null,
+                                               p_kind text default 'other') returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips;
@@ -754,8 +762,9 @@ begin
   select * into me from public.trip_passengers
    where trip_id = t.id and device_key_hash = public._hash(p_device_key);
   if me.id is null then raise exception 'not_allowed'; end if;
-  insert into public.trip_issues (trip_id, passenger_id, message)
-  values (t.id, me.id, left(coalesce(nullif(trim(p_message), ''), '정산에 문제가 있어요'), 500));
+  if coalesce(p_kind, 'other') not in ('place', 'people', 'amount', 'other') then raise exception 'bad_kind'; end if;
+  insert into public.trip_issues (trip_id, passenger_id, kind, message)
+  values (t.id, me.id, coalesce(p_kind, 'other'), left(nullif(trim(p_message), ''), 500));
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -792,7 +801,8 @@ begin
     'revisions', (select coalesce(jsonb_agg(jsonb_build_object('total', r.payload -> 'total', 'reason', r.reason,
                     'replaced_at', r.replaced_at) order by r.replaced_at), '[]'::jsonb)
                   from public.settlement_revisions r where r.trip_id = t.id),
-    'issues', (select coalesce(jsonb_agg(jsonb_build_object('message', i.message, 'created_at', i.created_at,
+    'issues', (select coalesce(jsonb_agg(jsonb_build_object('id', i.id, 'kind', i.kind, 'message', i.message,
+                 'created_at', i.created_at, 'resolved_at', i.resolved_at,
                  'name', (select name from public.trip_passengers p where p.id = i.passenger_id))
                  order by i.created_at), '[]'::jsonb)
                from public.trip_issues i where i.trip_id = t.id));
@@ -941,7 +951,8 @@ $$;
 -- Seat matching and boarding events reported by the car (also corrections from the arrival screen).
 create or replace function public.mark_passenger(
   p_code text, p_admin_secret text, p_passenger_id uuid,
-  p_seat text default null, p_boarded boolean default null, p_alighted boolean default null
+  p_seat text default null, p_boarded boolean default null, p_alighted boolean default null,
+  p_unchecked boolean default false     -- true: recorded while the driver did not confirm it (L5-3)
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
@@ -957,7 +968,12 @@ begin
     boarded_at = case when p_boarded is true then coalesce(boarded_at, now())
                       when p_boarded is false then null else boarded_at end,
     alighted_at = case when p_alighted is true then coalesce(alighted_at, now())
-                       when p_alighted is false or p_boarded is false then null else alighted_at end
+                       when p_alighted is false or p_boarded is false then null else alighted_at end,
+    board_unchecked = case when p_boarded is not null then p_boarded and coalesce(p_unchecked, false)
+                           else board_unchecked end,
+    alight_unchecked = case when p_boarded is false then false
+                            when p_alighted is not null then p_alighted and coalesce(p_unchecked, false)
+                            else alight_unchecked end
   where id = p_passenger_id and trip_id = t.id and record_deleted_at is null;
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
@@ -1219,7 +1235,8 @@ begin
 end $$;
 
 -- "정산에 문제가 있어요" on the settlement page: filed on the newest trip this person rode in the batch.
-create or replace function public.report_settle_issue(p_code text, p_device_key text, p_message text) returns jsonb
+create or replace function public.report_settle_issue(p_code text, p_device_key text, p_message text default null,
+                                                      p_kind text default 'other') returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   b public.folder_batches;
@@ -1233,8 +1250,9 @@ begin
   select p2.* into p from public.trip_passengers p2 join public.trips t on t.id = p2.trip_id
   where t.batch_id = b.id and public._person_key(p2) = pay.person_key
   order by t.created_at desc limit 1;
-  insert into public.trip_issues (trip_id, passenger_id, message)
-  values (p.trip_id, p.id, left(coalesce(nullif(trim(p_message), ''), '정산에 문제가 있어요'), 500));
+  if coalesce(p_kind, 'other') not in ('place', 'people', 'amount', 'other') then raise exception 'bad_kind'; end if;
+  insert into public.trip_issues (trip_id, passenger_id, kind, message)
+  values (p.trip_id, p.id, coalesce(p_kind, 'other'), left(nullif(trim(p_message), ''), 500));
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -1342,7 +1360,8 @@ begin
     'code', f.code, 'name', f.name,
     'requested', case when r.id is null then null else public._batch_summary(r.id) || jsonb_build_object(
       'requested_at', r.requested_at, 'code', r.code,
-      'issues', (select coalesce(jsonb_agg(jsonb_build_object('message', i.message, 'created_at', i.created_at,
+      'issues', (select coalesce(jsonb_agg(jsonb_build_object('id', i.id, 'kind', i.kind, 'message', i.message,
+                   'created_at', i.created_at, 'resolved_at', i.resolved_at,
                    'name', (select name from public.trip_passengers p where p.id = i.passenger_id))
                    order by i.created_at), '[]'::jsonb)
                  from public.trip_issues i join public.trips t on t.id = i.trip_id where t.batch_id = r.id),
@@ -1821,14 +1840,17 @@ declare v public.vehicles := public._vehicle(p_vehicle_secret);
 begin
   if v.id is null then raise exception 'not_allowed'; end if;
   return jsonb_build_object(
-    'linked', v.driver_id is not null,
+    'linked', exists (select 1 from public.drivers where id = v.driver_id and not car_only),
     'trips', (select coalesce(jsonb_agg(jsonb_build_object('code', t.code, 'title', t.title,
                 'passengers', (select count(*) from public.trip_passengers p where p.trip_id = t.id))
                 order by t.created_at desc), '[]'::jsonb)
               from public.trips t
               where t.driver_id = v.driver_id and t.status = 'preparing'
                 and t.created_at > now() - interval '7 days'),
-    'carpools', (select coalesce(jsonb_agg(jsonb_build_object('code', c.code, 'title', c.title)), '[]'::jsonb)
+    'carpools', (select coalesce(jsonb_agg(jsonb_build_object('code', c.code, 'title', c.title,
+                   'created_at', c.created_at, 'rule', c.rule,
+                   'members', (select count(*) from public.carpool_members m where m.carpool_id = c.id))
+                   order by c.created_at desc), '[]'::jsonb)
                  from public.carpools c where c.driver_id = v.driver_id and c.archived_at is null));
 end $$;
 
@@ -1838,6 +1860,188 @@ begin
   update public.vehicles set revoked_at = now(), driver_id = null
   where secret_hash = public._hash(p_vehicle_secret);
   return jsonb_build_object('ok', found);
+end $$;
+
+-- ---------------------------------------------------------------- car screens: records, requests, favourites
+
+-- The driver a phone or car secret acts for (a car used before linking acts for its car-only driver).
+create or replace function public._secret_driver(p_secret text) returns uuid
+language sql stable set search_path = public, extensions as $$
+  select coalesce((public._driver(p_secret)).id, (public._vehicle(p_secret)).driver_id)
+$$;
+
+-- L6 "+ 새 카풀 폴더": an empty folder to pick as a chip before the trip is stacked into it.
+create or replace function public.create_folder(p_secret text, p_name text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v public.vehicles := public._vehicle(p_secret);
+  did uuid := coalesce((public._driver(p_secret)).id, public._car_driver(v.id));
+  fc text;
+  f public.folders;
+begin
+  if did is null then raise exception 'not_allowed'; end if;
+  if nullif(trim(p_name), '') is null then raise exception 'name_required'; end if;
+  loop
+    fc := public._code(8);
+    exit when not exists (select 1 from public.folders where code = fc);
+  end loop;
+  insert into public.folders (code, driver_id, vehicle_id, name)
+  values (fc, did, v.id, trim(p_name)) returning * into f;
+  return jsonb_build_object('code', f.code, 'name', f.name);
+end $$;
+
+-- L1-3 a favourite as the car shows it: the driver's places, each member's kept places and the rule.
+create or replace function public.get_carpool_admin(p_carpool_code text, p_secret text) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare c public.carpools;
+begin
+  select * into c from public.carpools where code = upper(p_carpool_code) and archived_at is null;
+  if c.id is null then raise exception 'carpool_not_found'; end if;
+  if c.driver_id is distinct from public._secret_driver(p_secret) then raise exception 'not_allowed'; end if;
+  return jsonb_build_object(
+    'code', c.code, 'title', c.title, 'created_at', c.created_at,
+    'origin', c.origin, 'destination', c.destination,
+    'include_driver', c.include_driver, 'seats', c.seats, 'rule', c.rule,
+    'folder', (select jsonb_build_object('code', f.code, 'name', f.name) from public.folders f
+               where f.id = c.folder_id and f.archived_at is null),
+    'members', (select coalesce(jsonb_agg(jsonb_build_object('id', m.id, 'name', m.name,
+                  'pickup', m.pickup, 'dropoff', m.dropoff) order by m.created_at), '[]'::jsonb)
+                from public.carpool_members m where m.carpool_id = c.id));
+end $$;
+
+-- L1-3a: the favourite's name and the driver's own places. Members' places only go away with the x.
+create or replace function public.update_carpool(
+  p_carpool_code text, p_secret text,
+  p_title text default null, p_origin jsonb default null, p_destination jsonb default null
+) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare c public.carpools;
+begin
+  select * into c from public.carpools where code = upper(p_carpool_code) and archived_at is null;
+  if c.id is null then raise exception 'carpool_not_found'; end if;
+  if c.driver_id is distinct from public._secret_driver(p_secret) then raise exception 'not_allowed'; end if;
+  if (p_origin is not null and not (p_origin ? 'lat' and p_origin ? 'lng'))
+     or (p_destination is not null and not (p_destination ? 'lat' and p_destination ? 'lng')) then
+    raise exception 'place_needs_location';
+  end if;
+  update public.carpools set
+    title = coalesce(nullif(trim(p_title), ''), title),
+    origin = coalesce(p_origin, origin),
+    destination = coalesce(p_destination, destination)
+  where id = c.id;
+  return public.get_carpool_admin(p_carpool_code, p_secret);
+end $$;
+
+-- L1-5 지난 운행: trips that ran, newest first (p_before pages back), this month's amount to receive
+-- and who rode most often this month. Each trip opens with get_trip_admin(code, car or phone secret).
+create or replace function public.list_trips(p_secret text, p_limit int default 50, p_before timestamptz default null)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare did uuid := public._secret_driver(p_secret);
+begin
+  if did is null then raise exception 'not_allowed'; end if;
+  return jsonb_build_object(
+    'month', (select jsonb_build_object('trips', count(distinct t.id),
+                'receivable', coalesce(sum((x ->> 'amount')::numeric) filter (where x ->> 'passenger_id' is not null), 0))
+              from public.trips t
+              join public.settlements s on s.trip_id = t.id
+              cross join lateral jsonb_array_elements(s.payload -> 'shares') x
+              where t.driver_id = did and t.status = 'settled'
+                and date_trunc('month', s.settled_at) = date_trunc('month', now())),
+    'frequent', (select coalesce(jsonb_agg(jsonb_build_object('name', g.name, 'trips', g.n)
+                   order by g.n desc, g.name), '[]'::jsonb)
+                 from (select max(p.name) as name, count(distinct p.trip_id) as n
+                       from public.trips t join public.trip_passengers p on p.trip_id = t.id
+                       where t.driver_id = did and t.status = 'settled' and p.record_deleted_at is null
+                         and p.boarded_at is not null
+                         and date_trunc('month', coalesce(t.ended_at, t.created_at)) = date_trunc('month', now())
+                       group by public._person_key(p)
+                       order by count(distinct p.trip_id) desc, max(p.name) limit 3) g),
+    'trips', (select coalesce(jsonb_agg(z.j order by z.d desc), '[]'::jsonb) from (
+      select coalesce(t.ended_at, t.started_at, t.created_at) as d, jsonb_build_object(
+        'code', t.code, 'title', t.title, 'date', coalesce(t.ended_at, t.started_at, t.created_at),
+        'status', t.status, 'settle_mode', t.settle_mode,
+        'people', (select count(*) from public.trip_passengers p where p.trip_id = t.id
+                   and (p.boarded_at is not null or p.record_deleted_at is not null)),
+        'km', s.payload #> '{fuel,distance_km}',
+        'total', (s.payload ->> 'total')::numeric,
+        'receivable', (select coalesce(sum((x ->> 'amount')::numeric), 0)
+                       from jsonb_array_elements(s.payload -> 'shares') x where x ->> 'passenger_id' is not null),
+        'folder', (select jsonb_build_object('code', f.code, 'name', f.name, 'status', b.status)
+                   from public.folder_batches b join public.folders f on f.id = b.folder_id where b.id = t.batch_id),
+        'settle_done', s.trip_id is not null and t.settle_mode is not null and not exists (
+                         select 1 from public.trip_passengers p
+                         where p.trip_id = t.id and p.record_deleted_at is null
+                           and exists (select 1 from jsonb_array_elements(s.payload -> 'shares') x
+                                       where x ->> 'passenger_id' = p.id::text)
+                           and not public._settle_done(t, p)),
+        'unchecked', (select count(*) filter (where board_unchecked) + count(*) filter (where alight_unchecked)
+                      from public.trip_passengers p where p.trip_id = t.id),
+        'open_issues', (select count(*) from public.trip_issues i where i.trip_id = t.id and i.resolved_at is null)
+      ) as j
+      from public.trips t left join public.settlements s on s.trip_id = t.id
+      where t.driver_id = did and t.status in ('in_progress', 'settled')
+        and (p_before is null or coalesce(t.ended_at, t.started_at, t.created_at) < p_before)
+      order by 1 desc
+      limit greatest(1, least(coalesce(p_limit, 50), 200))) z));
+end $$;
+
+-- L1-8 동승자 요청: settlement problems reported on the driver's trips, open ones by default (the badge
+-- count is `open`), or the handled ones with p_resolved.
+create or replace function public.list_issues(p_secret text, p_resolved boolean default false) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare did uuid := public._secret_driver(p_secret);
+begin
+  if did is null then raise exception 'not_allowed'; end if;
+  return jsonb_build_object(
+    'open', (select count(*) from public.trip_issues i join public.trips t on t.id = i.trip_id
+             where t.driver_id = did and i.resolved_at is null),
+    'resolved', (select count(*) from public.trip_issues i join public.trips t on t.id = i.trip_id
+                 where t.driver_id = did and i.resolved_at is not null),
+    'issues', (select coalesce(jsonb_agg(jsonb_build_object(
+                 'id', i.id, 'kind', i.kind, 'message', i.message,
+                 'created_at', i.created_at, 'resolved_at', i.resolved_at,
+                 'passenger_id', p.id, 'name', p.name,
+                 'trip', jsonb_build_object('code', t.code, 'title', t.title,
+                                            'date', coalesce(t.ended_at, t.created_at), 'settle_mode', t.settle_mode),
+                 'pickup', p.pickup, 'boarded_at', p.boarded_at, 'dropoff', p.dropoff, 'alighted_at', p.alighted_at,
+                 'amount', (select (x ->> 'amount')::numeric
+                            from public.settlements st, jsonb_array_elements(st.payload -> 'shares') x
+                            where st.trip_id = t.id and x ->> 'passenger_id' = p.id::text limit 1),
+                 'settle_done', coalesce(public._settle_done(t, p), false))
+                 order by i.created_at desc), '[]'::jsonb)
+               from public.trip_issues i
+               join public.trips t on t.id = i.trip_id
+               left join public.trip_passengers p on p.id = i.passenger_id
+               where t.driver_id = did and (i.resolved_at is not null) = coalesce(p_resolved, false)));
+end $$;
+
+-- "고칠 것 없어요", or after 기록 고치기 (post_settlement with p_reason): the request is handled.
+-- p_resolved false puts it back on the list.
+create or replace function public.resolve_issue(p_secret text, p_issue_id uuid, p_resolved boolean default true)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare did uuid := public._secret_driver(p_secret);
+begin
+  if did is null then raise exception 'not_allowed'; end if;
+  update public.trip_issues i
+     set resolved_at = case when coalesce(p_resolved, true) then coalesce(i.resolved_at, now()) end
+  from public.trips t
+  where t.id = i.trip_id and i.id = p_issue_id and t.driver_id = did;
+  if not found then raise exception 'not_allowed'; end if;
+  return public.list_issues(p_secret, false);
+end $$;
+
+-- L5-4 / L6-1 "맞아요", "모두 맞아요": boarding and drop-off records the car made on its own are
+-- confirmed as they are (one passenger, or everyone with p_passenger_id null). Amounts do not change.
+create or replace function public.confirm_records(p_code text, p_admin_secret text, p_passenger_id uuid default null)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare t public.trips := public._trip_admin(p_code, p_admin_secret);
+begin
+  update public.trip_passengers set board_unchecked = false, alight_unchecked = false
+  where trip_id = t.id and (p_passenger_id is null or id = p_passenger_id);
+  return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
 -- ---------------------------------------------------------------- retention
@@ -1881,8 +2085,9 @@ declare
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
     'get_trip_admin', 'set_trip_status', 'set_join_open', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
-    'cancel_batch_request', 'mark_batch_paid',
+    'cancel_batch_request', 'mark_batch_paid', 'create_folder',
     'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool', 'archive_folder',
+    'get_carpool_admin', 'update_carpool', 'list_trips', 'list_issues', 'resolve_issue', 'confirm_records',
     'create_vehicle_link', 'claim_vehicle_link', 'get_vehicle_trips', 'revoke_vehicle'];
 begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
