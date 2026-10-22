@@ -71,20 +71,39 @@ test('errors come back as PostgREST does: 400 with code and message, 404 for unk
   });
 });
 
-test('the demo data gives the car a linked driver, a favourite with a folder and a trip ready to go', async () => {
+test('the demo data matches the plan: the 출근 카풀 folder of example 3 and the MT trip ready to go', async () => {
   const db = await openDb(null);
   const info = await seed(db);
   const car = await callRpc(db, 'get_vehicle_trips', { p_vehicle_secret: info.vehicle_secret });
   assert.equal(car.linked, true);
-  assert.deepEqual(car.trips.map((t) => t.code), [info.trips.mt.code]);
-  assert.equal(car.trips[0].passengers, 3);
-  assert.equal(car.carpools[0].code, info.carpool_code);
-  const folders = await callRpc(db, 'list_folders', { p_secret: info.vehicle_secret });
-  assert.deepEqual([folders[0].name, folders[0].status, folders[0].trips], ['출근 카풀', 'open', 3]);
-  assert.equal((await callRpc(db, 'get_bank_account', { p_vehicle_secret: info.vehicle_secret })).account,
-               '3333-01-2345678');
-  const sujin = await callRpc(db, 'get_trip', { p_code: info.trips.commute[2].code, p_device_key: info.devices.수진 });
-  assert.equal(sujin.folder.rides.length, 3);
+  assert.deepEqual(car.trips.map((t) => [t.code, t.title, t.passengers]), [[info.trips.mt_return.code, '동아리 MT 귀갓길', 3]]);
+  assert.deepEqual(car.carpools.map((c) => c.title).sort(), ['동아리 MT 가는 길', '출근 카풀']);
+  assert.equal((await callRpc(db, 'get_bank_account', { p_vehicle_secret: info.vehicle_secret })).bank_name, '페어은행');
+
+  // plan 3.4 example 3: 16 trips, 804km, 97,630원; 수진 14회 29,090 / 민호 10회 16,000 / 지은 5회 7,610 / 지훈 44,930
+  const folder = await callRpc(db, 'get_folder_admin', { p_folder_code: info.folder_code, p_secret: info.vehicle_secret });
+  assert.equal(folder.requested, null, '요청 전');
+  assert.equal(folder.open.trips.length, 16);
+  assert.equal(folder.open.trips.reduce((s, t) => s + Number(t.km), 0), 804);
+  assert.equal(Number(folder.open.total), 97630);
+  assert.equal(Number(folder.open.driver_amount), 44930);
+  assert.equal(Number(folder.open.receivable), 52700);
+  assert.deepEqual(folder.open.people.map((p) => [p.name, p.trips, Number(p.amount)]).sort(),
+                   [['민호', 10, 16000], ['수진', 14, 29090], ['지은', 5, 7610]]);
+  // her last ride, 10월 20일 (C)
+  const sujin = await callRpc(db, 'get_trip', { p_code: info.trips.commute[13].code, p_device_key: info.devices.수진 });
+  assert.equal(sujin.folder.rides.length, 14);
+  assert.equal(Number(sujin.folder.my_total), 29090);
+  assert.equal(sujin.folder.rides.filter((r) => Number(r.amount) === 2430).length, 6, 'the six mornings alone: 14,580원');
+
+  // the MT 귀갓길 riders as in the video script
+  const mt = await callRpc(db, 'get_trip_admin', { p_code: info.trips.mt_return.code, p_admin_secret: info.vehicle_secret });
+  assert.equal(mt.origin.label, '가평 MT 숙소');
+  const at = Object.fromEntries(mt.passengers.map((p) => [p.name, [p.pickup?.label ?? null, p.dropoff.label]]));
+  assert.deepEqual(at, { 민지: [null, '망원역'], 서연: [null, '연남동 공원'], 태호: ['신촌역 2번 출구', '연희동 주민센터'] });
+  const e = info.expected.mt_return;
+  assert.equal(e.shares.reduce((s, x) => s + x.amount, 0), e.total);
+  assert.equal(e.fuel.amount + e.toll, e.total);
   await db.close();
 });
 

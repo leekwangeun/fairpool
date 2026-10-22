@@ -44,7 +44,7 @@ Node.js 20 이상이 필요합니다. 자세한 내용은 [devserver/README.md](
 ```bash
 cd devserver
 npm install
-npm run reset   # DB를 새로 만들고 시연 데이터(지훈 차와 계좌, 출근 카풀 폴더, 동아리 MT 준비 운행)를 넣음
+npm run reset   # DB를 새로 만들고 시연 데이터(지훈 차와 계좌, 출근 카풀 폴더 16회, 동아리 MT 귀갓길 준비 운행)를 넣음
 npm start       # http://localhost:54321, 에뮬레이터는 http://10.0.2.2:54321
 ```
 
