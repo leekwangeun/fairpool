@@ -160,6 +160,9 @@ create table public.trips (
   -- live course posted by the car: {stops:[{kind, passenger_id, label, area, time, eta_min,
   -- distance_km, state}], car:{lat,lng}}; filtered per passenger in get_trip
   progress       jsonb,
+  -- once the trip has started, new passengers may join only while the car shows the invite QR again
+  -- while parked (set_join_open); the window closes by itself after 10 minutes
+  join_open_until timestamptz,
   -- after settlement: 'direct' (바로 정산) or 'folder' (stacked into batch_id)
   settle_mode    text check (settle_mode in ('direct', 'folder')),
   batch_id       uuid references public.folder_batches(id) on delete set null,
@@ -306,7 +309,7 @@ language plpgsql volatile set search_path = public, extensions as $$
 declare c text;
 begin
   loop
-    c := public._code(6);
+    c := public._code(8);
     exit when not exists (select 1 from public.trips where code = c);
   end loop;
   return c;
@@ -573,6 +576,7 @@ begin
     'rule', t.rule,
     'seats', t.seats,
     'seats_left', greatest(t.seats - taken, 0),
+    'joinable', t.status = 'preparing' or (t.status = 'in_progress' and coalesce(t.join_open_until > now(), false)),
     'driver_name', coalesce(d.display_name, '운전자'),
     'carpool_code', (select code from public.carpools where id = t.carpool_id),
     'passengers', (select coalesce(jsonb_agg(jsonb_build_object(
@@ -627,6 +631,10 @@ begin
   if t.status not in ('preparing', 'in_progress') then raise exception 'trip_closed'; end if;
   known := exists (select 1 from public.trip_passengers
                    where trip_id = t.id and device_key_hash = public._hash(p_device_key));
+  -- after departure only members may edit; newcomers need the QR shown again at a stop
+  if not known and t.status = 'in_progress' and coalesce(t.join_open_until < now(), true) then
+    raise exception 'join_closed';
+  end if;
   if not known and (select count(*) from public.trip_passengers where trip_id = t.id) >= t.seats then
     raise exception 'trip_full';
   end if;
@@ -697,6 +705,7 @@ begin
     'trip_id', t.id, 'code', t.code, 'title', t.title, 'origin', t.origin, 'destination', t.destination,
     'include_driver', t.include_driver, 'seats', t.seats, 'rule', t.rule, 'status', t.status,
     'created_at', t.created_at, 'started_at', t.started_at, 'ended_at', t.ended_at,
+    'join_open_until', t.join_open_until,
     'carpool_code', (select code from public.carpools where id = t.carpool_id),
     'passengers', public._passengers_admin(t.id),
     'progress', t.progress,
@@ -803,6 +812,19 @@ begin
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
+-- The car shows the invite QR again while parked (L2/P2 at a stop): new passengers may join for the next
+-- 10 minutes. The car closes it (p_open false) when the QR is hidden or the gear leaves P.
+create or replace function public.set_join_open(p_code text, p_admin_secret text, p_open boolean default true)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare t public.trips := public._trip_admin(p_code, p_admin_secret);
+begin
+  if t.status not in ('preparing', 'in_progress') then raise exception 'trip_closed'; end if;
+  update public.trips set join_open_until = case when p_open then now() + interval '10 minutes' end
+  where id = t.id;
+  return public.get_trip_admin(p_code, p_admin_secret);
+end $$;
+
 create or replace function public.set_trip_status(p_code text, p_admin_secret text, p_status text) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
@@ -811,6 +833,7 @@ begin
   update public.trips set
     status = p_status,
     started_at = case when p_status = 'in_progress' then coalesce(started_at, now()) else started_at end,
+    join_open_until = null,
     ended_at = case when p_status = 'cancelled' then now() else ended_at end
   where id = t.id;
   return public.get_trip_admin(p_code, p_admin_secret);
@@ -1674,7 +1697,7 @@ declare
     'get_bank_account', 'set_bank_account', 'get_driver_info', 'set_driver_info',
     'queue_trip_share', 'queue_batch_share',
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
-    'get_trip_admin', 'set_trip_status', 'update_progress', 'mark_passenger', 'post_settlement',
+    'get_trip_admin', 'set_trip_status', 'set_join_open', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
     'cancel_batch_request', 'mark_batch_paid',
     'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool',

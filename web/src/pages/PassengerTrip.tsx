@@ -85,6 +85,7 @@ export default function PassengerTrip() {
     if (mode === 'verify' || !open) {
       return <Verify trip={trip} deviceKey={deviceKey} onDone={done} onDriver={setDriverView} onBack={open ? () => setMode('view') : undefined} />;
     }
+    if (!trip.joinable) return <JoinClosed trip={trip} onVerify={() => setMode('verify')} />;
     return <Join trip={trip} deviceKey={deviceKey} onDone={done} onVerify={() => setMode('verify')} />;
   }
   if (mode === 'edit' && open) return <Join trip={trip} deviceKey={deviceKey} onDone={done} onCancel={() => setMode('view')} />;
@@ -97,6 +98,24 @@ export default function PassengerTrip() {
   }
   return (
     <Riding trip={trip} onEdit={trip.status === 'preparing' && !trip.me.boarded ? () => setMode('edit') : undefined} />
+  );
+}
+
+// After departure the invite QR lets newcomers in only while the car shows it again at a stop.
+function JoinClosed({ trip, onVerify }: { trip: PublicTrip; onVerify: () => void }) {
+  return (
+    <Page>
+      <Card className="gap-1.5">
+        <p className="t-caption text-brand">{trip.driver_name}님의 카풀</p>
+        <h1 className="t-title">{trip.title}</h1>
+        <p className="t-body text-sub">
+          이미 출발한 운행이에요. 함께 타려면 차가 멈췄을 때 {trip.driver_name}님에게 차 화면의 QR을 다시 띄워 달라고 해 주세요.
+        </p>
+      </Card>
+      <button type="button" onClick={onVerify} className="t-caption text-sub underline underline-offset-2">
+        다른 휴대폰에서 이미 참여했나요?
+      </button>
+    </Page>
   );
 }
 

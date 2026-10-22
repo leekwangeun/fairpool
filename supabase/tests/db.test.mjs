@@ -32,7 +32,7 @@ test('each new trip gets its own code and admin secret', async () => {
   const db = await freshDb();
   const a = await rpc(db, 'create_trip', { p_title: 'MT 귀갓길', p_destination: place('지훈 집') });
   const b = await rpc(db, 'create_trip', { p_title: 'MT 귀갓길' });
-  assert.match(a.code, /^[2-9A-HJ-NP-Z]{6}$/);
+  assert.match(a.code, /^[2-9A-HJ-NP-Z]{8}$/, "8 characters so invite codes cannot be guessed");
   assert.notEqual(a.code, b.code);
   assert.equal(a.admin_secret.length, 48);
 });
@@ -473,7 +473,25 @@ test('records are corrected, never deleted: removing my place during a trip and 
                                p_pickup: place('정류장'), p_dropoff: place('집') });
   await rpc(db, 'set_trip_status', { p_code: code, p_admin_secret: admin_secret, p_status: 'in_progress' });
 
-  await rpc(db, 'join_trip', { p_code: code, p_device_key: device(2), p_name: '서연', p_dropoff: place('서연 집') });
+  // after departure the invite QR no longer lets newcomers in, members can still edit their stops
+  const seoyeonJoin = { p_code: code, p_device_key: device(2), p_name: '서연', p_dropoff: place('서연 집') };
+  await assert.rejects(rpc(db, 'join_trip', seoyeonJoin), /join_closed/);
+  assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(2) })).joinable, false);
+  await rpc(db, 'join_trip', { p_code: code, p_device_key: device(1), p_name: '민지', p_phone4: '1234',
+                               p_pickup: place('정류장'), p_dropoff: place('집') });
+  // the car shows the QR again at a stop: open for 10 minutes
+  const opened = await rpc(db, 'set_join_open', { p_code: code, p_admin_secret: admin_secret });
+  assert.ok(new Date(opened.join_open_until) > new Date());
+  assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(2) })).joinable, true);
+  await rpc(db, 'join_trip', seoyeonJoin);
+  // closed again when the QR is hidden or the car drives off, and on its own after 10 minutes
+  await rpc(db, 'set_join_open', { p_code: code, p_admin_secret: admin_secret, p_open: false });
+  await assert.rejects(rpc(db, 'join_trip', { p_code: code, p_device_key: device(3), p_name: '늦은 사람' }), /join_closed/);
+  await rpc(db, 'set_join_open', { p_code: code, p_admin_secret: admin_secret });
+  await db.query(`update public.trips set join_open_until = now() - interval '1 minute'`);
+  await assert.rejects(rpc(db, 'join_trip', { p_code: code, p_device_key: device(3), p_name: '늦은 사람' }), /join_closed/);
+  await assert.rejects(rpc(db, 'set_join_open', { p_code: code, p_admin_secret: 'passenger' }), /not_allowed/);
+
   let admin = await rpc(db, 'get_trip_admin', { p_code: code, p_admin_secret: admin_secret });
   const minji = admin.passengers.find((p) => p.name === '민지');
   const seoyeon = admin.passengers.find((p) => p.name === '서연');

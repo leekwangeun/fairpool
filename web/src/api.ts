@@ -11,6 +11,7 @@ const supabase = demoMode ? null : createClient(url!, anonKey!, { auth: { persis
 const messages: Record<string, string> = {
   trip_not_found: '운행을 찾을 수 없어요. 링크를 다시 확인해 주세요.',
   trip_closed: '이미 끝난 운행이에요.',
+  join_closed: '이미 출발한 운행이에요. 차가 멈추면 운전자에게 차 화면의 QR을 다시 띄워 달라고 해 주세요.',
   trip_full: '자리가 모두 찼어요.',
   trip_started: '이미 출발한 운행이라 빠질 수 없어요.',
   not_allowed: '이 운행을 관리할 권한이 없어요.',
@@ -148,6 +149,8 @@ export type PublicTrip = {
   rule: Rule;
   seats: number;
   seats_left: number;
+  // false once the trip has started, unless the car shows the invite QR again at a stop
+  joinable: boolean;
   driver_name: string;
   carpool_code: string | null;
   passengers: { name: string; is_me: boolean; boarded: boolean; alighted: boolean }[];
@@ -272,6 +275,7 @@ export type AdminTrip = {
   seats: number;
   rule: Rule;
   status: TripStatus;
+  join_open_until: string | null;
   carpool_code: string | null;
   passengers: AdminPassenger[];
   settlement: Settlement | null;

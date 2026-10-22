@@ -105,7 +105,11 @@ export default function DriverTrip() {
       </div>
 
       <Card className="items-center gap-4 text-center">
-        <p className="t-caption text-sub">동승자가 찍으면 이 운행 페이지가 열려요</p>
+        <p className="t-caption text-sub">
+          {trip?.status === 'in_progress'
+            ? '출발한 운행이라 새 동승자는 차가 멈춘 뒤 차 화면에 QR을 다시 띄웠을 때만 참여할 수 있어요'
+            : '동승자가 찍으면 이 운행 페이지가 열려요'}
+        </p>
         <QrImage text={link} />
         <div>
           <p className="t-caption text-sub">운행 코드</p>
@@ -383,6 +387,7 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
   const [note, setNote] = useState('');
   const ps = trip.passengers;
   const settled = trip.status === 'settled';
+  const joinOpen = !!trip.join_open_until && new Date(trip.join_open_until) > new Date();
   const hhmm = (d: Date) => d.toTimeString().slice(0, 5);
   const allBoarded = ps.length > 0 && ps.every((p) => p.boarded_at);
 
@@ -479,6 +484,14 @@ function DemoTools({ trip, secret, run }: { trip: AdminTrip; secret: string; run
           <Button variant="secondary" onClick={settle} disabled={ps.length === 0}>
             정산 결과 보내기
           </Button>
+          {trip.status === 'in_progress' && (
+            <Button
+              variant="secondary"
+              onClick={() => run(() => rpc('set_join_open', { p_code: trip.code, p_admin_secret: secret, p_open: !joinOpen }))}
+            >
+              {joinOpen ? '정차 중 QR 닫기 (새 참여 막기)' : '정차 중 QR 다시 띄우기 (10분 동안 참여)'}
+            </Button>
+          )}
         </>
       )}
       {(!settled || trip.settle_mode) && (
