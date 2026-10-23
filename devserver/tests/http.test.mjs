@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { start } from '../server.mjs';
-import { callRpc, openDb } from '../db.mjs';
+import { applyFunctions, callRpc, openDb } from '../db.mjs';
 import { seed } from '../seed.mjs';
 
 async function withServer(fn) {
@@ -104,6 +104,15 @@ test('the demo data matches the plan: the 출근 카풀 folder of example 3 and 
   const e = info.expected.mt_return;
   assert.equal(e.shares.reduce((s, x) => s + x.amount, 0), e.total);
   assert.equal(e.fuel.amount + e.toll, e.total);
+  await db.close();
+});
+
+test('npm run upgrade can apply the functions again on a database that already has data', async () => {
+  const db = await openDb(null);
+  const info = await seed(db);
+  assert.ok((await applyFunctions(db)) > 50);
+  const car = await callRpc(db, 'get_vehicle_trips', { p_vehicle_secret: info.vehicle_secret });
+  assert.equal(car.trips[0].code, info.trips.mt_return.code, 'the same secret still opens the same data');
   await db.close();
 });
 

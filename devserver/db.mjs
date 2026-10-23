@@ -40,6 +40,15 @@ export async function openDb(dataDir = defaultDataDir) {
   return db;
 }
 
+// npm run upgrade: when only functions changed in the migration, run every `create or replace function`
+// again on the existing database (in file order), so the data and the secrets stay.
+export async function applyFunctions(db, dataDir = null) {
+  const blocks = migration.match(/create or replace function [\s\S]*?\$\$;/g) ?? [];
+  for (const sql of blocks) await db.exec(sql);
+  if (dataDir !== null) writeFileSync(join(dataDir, 'migration.hash'), migrationHash);
+  return blocks.length;
+}
+
 // One RPC call with named arguments, as PostgREST does it: select public.fn(a => $1, b => $2).
 export async function callRpc(db, fn, args = {}) {
   const names = Object.keys(args).filter((k) => args[k] !== undefined);
