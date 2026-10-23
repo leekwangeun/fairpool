@@ -24,6 +24,7 @@ import kr.fairpool.car.trip.distanceKm
 import org.json.JSONObject
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapLibreMap
@@ -73,7 +74,8 @@ private data class Mark(val place: Place, val kind: String, val label: String, v
  * the start and every stop, a green circle where each person gets in and a blue pin where they get out.
  */
 @Composable
-fun CourseMap(origin: Place?, plan: List<Stop>, passengers: List<Passenger>, modifier: Modifier = Modifier) {
+fun CourseMap(origin: Place?, plan: List<Stop>, passengers: List<Passenger>, modifier: Modifier = Modifier,
+              car: Pair<Double, Double>? = null) {
     val context = LocalContext.current
     val mapView = remember {
         MapLibre.getInstance(context)
@@ -145,9 +147,25 @@ fun CourseMap(origin: Place?, plan: List<Stop>, passengers: List<Passenger>, mod
             )
         }
     }
+    LaunchedEffect(style, car) {
+        val s = style ?: return@LaunchedEffect
+        val (lat, lng) = car ?: return@LaunchedEffect
+        if (s.getImage("fairpool-car") == null) s.addImage("fairpool-car", MarkerIcons.car(context.resources.displayMetrics.density * 1.35f))
+        setSource(s, "car", FeatureCollection.fromFeature(Feature.fromGeometry(Point.fromLngLat(lng, lat))))
+        if (s.getLayer("car-layer") == null) {
+            s.addLayer(SymbolLayer("car-layer", "car").withProperties(iconImage("fairpool-car"), iconAllowOverlap(true), iconIgnorePlacement(true)))
+        }
+    }
+    // while driving the camera follows the car; otherwise it shows the whole course
+    LaunchedEffect(map, car) {
+        val m = map ?: return@LaunchedEffect
+        val (lat, lng) = car ?: return@LaunchedEffect
+        m.animateCamera(CameraUpdateFactory.newCameraPosition(
+            CameraPosition.Builder().target(LatLng(lat, lng)).zoom(14.0).tilt(45.0).build()), 900)
+    }
     LaunchedEffect(map, points) {
         val m = map ?: return@LaunchedEffect
-        if (points.size < 2) return@LaunchedEffect
+        if (points.size < 2 || car != null) return@LaunchedEffect
         val bounds = LatLngBounds.Builder().apply { points.forEach { include(LatLng(it.lat, it.lng)) } }.build()
         val d = context.resources.displayMetrics.density
         val side = (120 * d).toInt()

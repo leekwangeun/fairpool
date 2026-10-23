@@ -82,6 +82,10 @@ data class TripState(
     val efficiencyKmL: Double? = null,
     val toll: Long = 0,
     val fix: Pair<Double, Double>? = null,
+    /** Road km and minutes from the car to every stop still ahead, in plan order (OSRM from the current fix). */
+    val ahead: List<Pair<Double, Int>> = emptyList(),
+    /** The car is within the arrival radius of the next stop. */
+    val atStop: Boolean = false,
     val seatOccupied: Map<SeatSlot, Boolean> = emptyMap(),
     val doorOpen: Map<SeatSlot, Boolean> = emptyMap(),
     val card: PendingCard? = null,
@@ -384,11 +388,39 @@ object TripEngine {
 
     private var fixLogged = false
 
+    private var aheadAt = 0L
+    private var aheadFrom: Pair<Double, Double>? = null
+    private var aheadJob: Job? = null
+
     fun onLocation(lat: Double, lng: Double) {
-        _state.update { it.copy(fix = lat to lng) }
+        val here = Place("", lat, lng)
+        val wasAt = _state.value.atStop
+        _state.update { s ->
+            val near = s.phase == Phase.DRIVING && s.nextStop?.let { it.place.distanceKm(here) <= ARRIVE_KM } == true
+            s.copy(fix = lat to lng, atStop = near)
+        }
         if (!fixLogged) {
             fixLogged = true
             log("위치 수신: %.5f, %.5f".format(lat, lng))
+        }
+        val s = _state.value
+        if (s.phase != Phase.DRIVING) return
+        if (s.atStop && !wasAt) log("${s.nextStop?.place?.label} 도착 (위치 반경 ${(ARRIVE_KM * 1000).toInt()}m)")
+        // remaining km and minutes to every stop: the navi cannot follow the emulator GPS, so ask the router
+        val now = System.currentTimeMillis()
+        val moved = aheadFrom?.let { Place("", it.first, it.second).distanceKm(here) } ?: Double.MAX_VALUE
+        if (now - aheadAt < 5_000 || moved < 0.15 || aheadJob?.isActive == true) return
+        aheadAt = now
+        aheadFrom = lat to lng
+        val stops = s.plan.filter { !it.done }.map { it.place }
+        if (stops.isEmpty()) return
+        aheadJob = scope.launch(Dispatchers.IO) {
+            val legs = runCatching { routeLegs(listOf(here) + stops) }.getOrNull() ?: return@launch
+            var km = 0.0
+            var min = 0.0
+            val list = legs.map { (k, m) -> km += k; min += m; round1(km) to Math.round(min).toInt() }
+            _state.update { it.copy(ahead = list) }
+            pushProgress()
         }
     }
 
@@ -438,6 +470,7 @@ object TripEngine {
                 passengers = st.passengers.map { if (it.id == passengerId) it.copy(boarded = true, alighted = false, seat = slot ?: it.seat, boardKm = km, boardPlace = place) else it },
                 events = st.events + TripEvent(passengerId, true, km, place, System.currentTimeMillis(), st.fix),
                 plan = st.plan.map { if (it.kind == "pickup" && it.passengerId == passengerId) it.copy(done = true) else it },
+                ahead = st.ahead.drop(1),
                 card = PendingCard(passengerId, p.name, true, System.currentTimeMillis())
             )
         }
@@ -460,6 +493,7 @@ object TripEngine {
                 passengers = st.passengers.map { if (it.id == passengerId) it.copy(alighted = true, alightKm = km, alightPlace = place) else it },
                 events = st.events + TripEvent(passengerId, false, km, place, System.currentTimeMillis(), st.fix),
                 plan = st.plan.map { if (it.passengerId == passengerId) it.copy(done = true) else it },
+                ahead = st.ahead.drop(1),
                 card = PendingCard(passengerId, p.name, false, System.currentTimeMillis())
             )
         }
@@ -515,18 +549,32 @@ object TripEngine {
 
     private suspend fun pushProgress() {
         val s = _state.value
-        if (s.code.isEmpty()) return
+        if (s.code.isEmpty() || s.phase == Phase.ARRIVED || s.phase == Phase.SETTLED) return
         val stops = JSONArray()
-        s.origin?.let { stops.put(JSONObject().put("kind", "start").put("label", it.label).put("state", "done")) }
+        val hhmm = SimpleDateFormat("HH:mm", Locale.KOREA)
+        s.origin?.let { o ->
+            val left = s.events.minOfOrNull { it.time }
+            stops.put(JSONObject().put("kind", "start").put("label", o.label).put("state", "done").apply {
+                if (left != null) put("time", hhmm.format(Date(left)))
+            })
+        }
         val next = s.nextStop
+        var aheadIndex = 0
         for (st in s.plan) {
             val o = JSONObject().put("kind", st.kind).put("label", st.place.label).put("area", st.place.area)
                 .put("state", if (st.done) "done" else if (st == next) "now" else "next")
             st.passengerId?.let { o.put("passenger_id", it) }
+            if (st.done) {
+                s.events.lastOrNull { it.passengerId == st.passengerId && it.boarding == (st.kind == "pickup") }
+                    ?.let { o.put("time", hhmm.format(Date(it.time))) }
+            } else {
+                s.ahead.getOrNull(aheadIndex++)?.let { (km, min) -> o.put("eta_min", min).put("distance_km", km) }
+            }
             stops.put(o)
         }
-        call("update_progress", args("p_code" to s.code, "p_admin_secret" to s.adminSecret,
-            "p_progress" to JSONObject().put("stops", stops)))
+        val progress = JSONObject().put("stops", stops)
+        s.fix?.let { (lat, lng) -> progress.put("car", JSONObject().put("lat", lat).put("lng", lng)) }
+        call("update_progress", args("p_code" to s.code, "p_admin_secret" to s.adminSecret, "p_progress" to progress))
     }
 
     /** One call at a time, in the order the car recorded things (an undo must not overtake its boarding). */
@@ -683,6 +731,26 @@ object TripEngine {
     }
 
     private fun round1(x: Double) = Math.round(x * 10) / 10.0
+
+    private const val ARRIVE_KM = 0.12
+
+    /** Road km and minutes of each leg through the points in order, from the public OSRM demo router. */
+    private fun routeLegs(points: List<Place>): List<Pair<Double, Double>> {
+        val coords = points.joinToString(";") { "%.6f,%.6f".format(Locale.US, it.lng, it.lat) }
+        val conn = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=false").openConnection() as HttpURLConnection
+        conn.connectTimeout = 6000
+        conn.readTimeout = 10000
+        conn.setRequestProperty("User-Agent", "FairPool-car-demo")
+        try {
+            val legs = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                .getJSONArray("routes").getJSONObject(0).getJSONArray("legs")
+            return (0 until legs.length()).map { i ->
+                legs.getJSONObject(i).let { it.getDouble("distance") / 1000.0 to it.getDouble("duration") / 60.0 }
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
 
     private val routeCache = mutableMapOf<String, Double>()
 

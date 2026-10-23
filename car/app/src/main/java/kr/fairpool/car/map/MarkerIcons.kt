@@ -46,6 +46,18 @@ object MarkerIcons {
         return bmp
     }
 
+    /** The car: a blue dot with a white ring and a soft halo. */
+    fun car(density: Float): Bitmap {
+        val size = (96 * density).toInt()
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val cx = size / 2f
+        c.drawCircle(cx, cx, size / 2f, shapePaint(0x403478F6, 0f))
+        c.drawCircle(cx, cx, 22 * density, shapePaint(Color.WHITE, density))
+        c.drawCircle(cx, cx, 16 * density, shapePaint(BLUE, 0f))
+        return bmp
+    }
+
     fun tag(label: String, fill: Int, density: Float): Bitmap {
         val pad = 4 * density
         val textPaint = labelPaint(15 * density)

@@ -842,13 +842,21 @@ private fun DrivingScreen(onArrive: () -> Unit) {
                 Card(Modifier.fillMaxWidth()) {
                     Body(when (next?.kind) { "pickup" -> "${next.name} 태울 곳"; "dropoff" -> "${next.name} 내릴 곳"; else -> "도착지" }, size = 18)
                     Title(next?.place?.label ?: (trip.destination?.label ?: ""), 40)
-                    Body(next?.place?.area ?: "", size = 18)
+                    val ahead = trip.ahead.firstOrNull()
+                    Body(
+                        when {
+                            trip.atStop -> "도착했어요 · ${next?.place?.area ?: ""}"
+                            ahead != null -> "%.1fkm · 약 %d분 · %s".format(ahead.first, ahead.second, next?.place?.area ?: "")
+                            else -> next?.place?.area ?: ""
+                        },
+                        if (trip.atStop) Green else Sub, 18
+                    )
                 }
                 Spacer(Modifier.height(16.dp))
                 Card(Modifier.fillMaxWidth().weight(1f), 14) {
                   Row(Modifier.fillMaxSize()) {
                     CourseMap(trip.origin, trip.plan, trip.passengers,
-                        Modifier.weight(1.45f).fillMaxHeight().clip(RoundedCornerShape(16.dp)))
+                        Modifier.weight(1.45f).fillMaxHeight().clip(RoundedCornerShape(16.dp)), car = trip.fix)
                     Spacer(Modifier.width(18.dp))
                     Column(Modifier.weight(1f).padding(top = 8.dp).verticalScroll(rememberScrollState())) {
                         Body("코스", Ink, 19)

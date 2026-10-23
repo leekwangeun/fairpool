@@ -44,6 +44,8 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- the driving screen (L4) shows only the course, the next stop and the stop card: no typing while moving -->
+            <meta-data android:name="distractionOptimized" android:value="true" />
         </activity>
 
         <service
