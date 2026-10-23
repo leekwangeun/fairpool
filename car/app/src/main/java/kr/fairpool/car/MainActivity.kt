@@ -72,6 +72,7 @@ import kr.fairpool.car.trip.Phase
 import kr.fairpool.car.trip.SeatSlot
 import kr.fairpool.car.trip.TripEngine
 import kr.fairpool.car.trip.TripService
+import kr.fairpool.car.trip.distanceKm
 import kr.fairpool.car.trip.Voice
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -472,7 +473,6 @@ private val rules = listOf(
     RuleOption("N분의 1", "운전자 제외", "equal", false)
 )
 
-private val destinations = listOf(DemoPlaces.eungam, DemoPlaces.office, DemoPlaces.yeonhui)
 
 @Composable
 private fun HomeScreen(
@@ -483,8 +483,18 @@ private fun HomeScreen(
     var title by remember { mutableStateOf("MT 귀갓길") }
     var seats by remember { mutableIntStateOf(3) }
     var rule by remember { mutableIntStateOf(0) }
-    var dest by remember { mutableIntStateOf(0) }
+    var dest by remember { mutableStateOf<Place?>(null) }
+    var picking by remember { mutableStateOf(false) }
     var consent by remember { mutableStateOf(true) }
+    val bookmarks by TripEngine.naviBookmarks.collectAsState()
+    val recents by TripEngine.naviRecents.collectAsState()
+    // the navi's own list; only when it has nothing does the demo home stand in
+    val naviPlaces = (bookmarks + recents).distinctBy { "%.4f,%.4f".format(java.util.Locale.US, it.place.lat, it.place.lng) }
+    val choices = naviPlaces.ifEmpty { listOf(kr.fairpool.car.trip.NaviPlace(DemoPlaces.home, "시연용")) }
+    LaunchedEffect(Unit) { TripEngine.navi?.requestPlaces() }
+    // until the driver picks one (or a favourite sets it), follow the navi list as it arrives
+    var destAuto by remember { mutableStateOf(true) }
+    LaunchedEffect(choices) { if (dest == null || destAuto) dest = choices.firstOrNull()?.place }
     var busy by remember { mutableStateOf(false) }
     var carpools by remember { mutableStateOf(JSONArray()) }
     var prepared by remember { mutableStateOf(JSONArray()) }
@@ -505,8 +515,8 @@ private fun HomeScreen(
         scope.launch {
             try {
                 val t = rpc.call("get_trip_admin", args("p_code" to code, "p_admin_secret" to secret))
-                val origin = Place.from(t.optJSONObject("origin")) ?: DemoPlaces.school
-                val destination = Place.from(t.optJSONObject("destination")) ?: DemoPlaces.eungam
+                val origin = Place.from(t.optJSONObject("origin")) ?: currentPlace()
+                val destination = Place.from(t.optJSONObject("destination")) ?: dest ?: DemoPlaces.home
                 TripEngine.startInvite(code, secret ?: "", t.optString("title"), origin, destination, t.optInt("seats", 3),
                     t.optBoolean("include_driver", true), t.optString("rule", "shapley"))
                 TripEngine.applyTripAdmin(t)
@@ -515,6 +525,23 @@ private fun HomeScreen(
                 onMessage("운행을 불러오지 못했어요: ${e.message}")
             }
         }
+    }
+    /** A saved carpool (즐겨찾기): same name, destination, rule and size; members join again by QR. */
+    fun fromCarpool(code: String, name: String) {
+        title = name
+        scope.launch {
+            runCatching { rpc.call("get_carpool_admin", args("p_carpool_code" to code, "p_secret" to secret)) }
+                .onSuccess { c ->
+                    Place.from(c.optJSONObject("destination"))?.let { dest = it; destAuto = false }
+                    seats = c.optInt("seats", seats).coerceIn(1, SeatSlot.entries.size)
+                    rules.indexOfFirst { it.rule == c.optString("rule") && it.includeDriver == c.optBoolean("include_driver", true) }
+                        .takeIf { it >= 0 }?.let { rule = it }
+                }
+                .onFailure { onMessage("즐겨찾기를 불러오지 못했어요: ${it.message}") }
+        }
+    }
+    if (picking) {
+        DestinationPicker(bookmarks, recents, dest, onPick = { dest = it; destAuto = false; picking = false }, onClose = { picking = false })
     }
     Column(Modifier.fillMaxSize()) {
         Header("주차 중${if (config.demo) " · 데모" else ""}", Green, onSettings)
@@ -547,10 +574,15 @@ private fun HomeScreen(
                     rules.forEachIndexed { i, r -> Chip(r.title, rule == i, Modifier.weight(1f), r.sub) { rule = i } }
                 }
                 Spacer(Modifier.height(18.dp))
-                Body("도착지", Ink, 18)
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    destinations.forEachIndexed { i, p -> Chip(p.label, dest == i, Modifier.weight(1f), p.area) { dest = i } }
+                Card(Modifier.fillMaxWidth().clickable { picking = true }, 22) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Body("도착지", size = 16)
+                            Text(dest?.label ?: "내비에서 고르기", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Ink)
+                            Body(dest?.address?.takeIf { it.isNotEmpty() && it != dest?.label } ?: "출발지는 출발할 때 차 위치로 기록해요", size = 15)
+                        }
+                        Text("바꾸기 ›", fontSize = 19.sp, color = Blue)
+                    }
                 }
                 Spacer(Modifier.height(18.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -586,7 +618,7 @@ private fun HomeScreen(
                     if (carpools.length() == 0) Body("즐겨찾기한 카풀이 아직 없어요", size = 17)
                     for (i in 0 until minOf(3, carpools.length())) {
                         val c = carpools.getJSONObject(i)
-                        Row(Modifier.fillMaxWidth().clickable { title = c.optString("title") }.padding(vertical = 10.dp)) {
+                        Row(Modifier.fillMaxWidth().clickable { fromCarpool(c.optString("code"), c.optString("title")) }.padding(vertical = 10.dp)) {
                             Column {
                                 Text(c.optString("title"), fontSize = 19.sp, color = Ink)
                                 Body("함께 탄 사람 ${c.optInt("members", c.optJSONArray("members")?.length() ?: 0)}명", size = 15)
@@ -601,11 +633,11 @@ private fun HomeScreen(
             }
         }
         Spacer(Modifier.height(16.dp))
-        Btn(if (busy) "만드는 중..." else "초대 QR 만들기", Modifier.fillMaxWidth(), enabled = consent && !busy && title.isNotBlank()) {
+        Btn(if (busy) "만드는 중..." else "초대 QR 만들기", Modifier.fillMaxWidth(), enabled = consent && !busy && title.isNotBlank() && dest != null) {
             busy = true
             scope.launch {
-                val origin = DemoPlaces.school
-                val destination = destinations[dest]
+                val origin = currentPlace()
+                val destination = dest ?: return@launch
                 val r = rules[rule]
                 try {
                     val res = rpc.call("create_trip", args(
@@ -618,6 +650,59 @@ private fun HomeScreen(
                     onMessage("운행을 만들지 못했어요: ${e.message}")
                 }
                 busy = false
+            }
+        }
+    }
+}
+
+/** Where the car is now (Pleos FusedLocation); the trip's start is recorded from it. */
+private fun currentPlace(): Place =
+    TripEngine.state.value.fix?.let { (lat, lng) -> Place("출발 위치", lat, lng) } ?: DemoPlaces.lodge
+
+/** L1-10 도착지 고르기: the navi's bookmarks or recent destinations (two tabs), one place, no typing. */
+@Composable
+private fun DestinationPicker(bookmarks: List<kr.fairpool.car.trip.NaviPlace>, recents: List<kr.fairpool.car.trip.NaviPlace>,
+                              selected: Place?, onPick: (Place) -> Unit, onClose: () -> Unit) {
+    val fallback = bookmarks.isEmpty() && recents.isEmpty()
+    var tab by remember { mutableIntStateOf(if (bookmarks.isEmpty() && recents.isNotEmpty()) 1 else 0) }
+    var picked by remember { mutableStateOf(selected) }
+    val list = when {
+        fallback -> listOf(kr.fairpool.car.trip.NaviPlace(DemoPlaces.home, "시연용"))
+        tab == 0 -> bookmarks
+        else -> recents
+    }
+    Dialog(onDismissRequest = onClose) {
+        Card(Modifier.width(760.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Title("도착지 고르기", 28)
+                    Body(picked?.label?.let { "고른 도착지: $it" } ?: "운전자의 최종 목적지를 하나 골라요", size = 16)
+                }
+                Chip("내비 즐겨찾기", tab == 0) { tab = 0 }
+                Spacer(Modifier.width(8.dp))
+                Chip("최근 목적지", tab == 1) { tab = 1 }
+            }
+            Spacer(Modifier.height(12.dp))
+            Column(Modifier.height(440.dp).verticalScroll(rememberScrollState())) {
+                if (fallback) Body("내비에 즐겨찾기와 최근 목적지가 없어 시연용 장소를 보여 줘요", Orange, 15)
+                else if (list.isEmpty()) Body(if (tab == 0) "내비에 즐겨찾기가 없어요" else "최근 목적지가 없어요", size = 16)
+                for (c in list) {
+                    val on = picked?.let { it.label == c.place.label && it.distanceKm(c.place) < 0.05 } == true
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(if (on) BlueSoft else Color.Transparent)
+                        .clickable { picked = c.place }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(c.kind, fontSize = 16.sp, color = Blue, modifier = Modifier.width(80.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(c.place.label, fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                            if (c.place.address.isNotEmpty() && c.place.address != c.place.label) Body(c.place.address, size = 15)
+                        }
+                        if (on) Text("✓", fontSize = 22.sp, color = Blue)
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Btn("취소", Modifier.weight(1f), primary = false, onClick = onClose)
+                Btn("고르기", Modifier.weight(1f), enabled = picked != null) { picked?.let(onPick) }
             }
         }
     }
@@ -955,14 +1040,14 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
     var newFolder by remember { mutableStateOf("") }
     var tollEdit by remember { mutableStateOf<String?>(null) }
     var showGroups by remember { mutableStateOf(false) }
+    var confirming by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         val a = TripEngine.computeSettlement()
         if (a != null) {
             val riders = a.shares.count { !it.rider.isDriver }
             Voice.say("오늘 총비용 ${NumberFormat.getInstance().format(a.total)}원, 동승자 ${riders}명에게 보낼 준비가 됐어요")
         }
-        // keep trying until the passengers' pages have it (a dropped connection must not leave it unposted)
-        while (a != null && !TripEngine.postSettlement()) delay(4000)
+        // nothing goes to the passengers yet: the driver checks (and fixes the toll), then 확정 posts it once
         runCatching { folders = rpc.call("get_trip_admin", args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret)).optJSONArray("folders") ?: JSONArray() }
     }
     val a = trip.allocation
@@ -1002,8 +1087,9 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                     tollEdit = null
                     TripEngine.setToll(won)
                     scope.launch {
-                        val again = TripEngine.computeSettlement()
-                        while (again != null && !TripEngine.postSettlement()) delay(4000)
+                        TripEngine.computeSettlement()?.let {
+                            Voice.say("통행료를 반영해 총비용은 ${NumberFormat.getInstance().format(it.total)}원이에요")
+                        }
                     }
                 }
                 Field("통행료 (원)", value, { tollEdit = it.filter(Char::isDigit) }, onDone = { apply() })
@@ -1044,7 +1130,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                     Stat("연비", "%.1fkm/L".format(trip.efficiencyKmL ?: TripEngine.defaultEfficiency), Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
-                Body(if (trip.settlementPosted) "동승자 페이지에 정산을 올렸어요" else "정산을 올리는 중이에요", if (trip.settlementPosted) Green else Sub, 17)
+                Body(if (trip.settlementPosted) "동승자 페이지에 정산을 올렸어요" else "확정하면 동승자 페이지에 올라가요", if (trip.settlementPosted) Green else Sub, 17)
                 Spacer(Modifier.height(12.dp))
                 // only the people who actually rode, in colour
                 val rode = trip.passengers.filter { it.boarded }
@@ -1102,9 +1188,12 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                                 .onSuccess { onMessage("운전자 휴대폰에 정산 카드를 보냈어요") }.onFailure { onMessage("보내지 못했어요: ${it.message}") }
                         }
                     }
-                    Btn("확정하고 완료", Modifier.weight(1f), enabled = chosen != null && trip.settlementPosted) {
+                    Btn(if (confirming) "올리는 중..." else "확정하고 완료", Modifier.weight(1f), enabled = chosen != null && !confirming) {
+                        confirming = true
                         scope.launch {
                             val c = chosen ?: return@launch
+                            // one post_settlement, with the toll the driver checked; retry if the network drops
+                            while (!trip.settlementPosted && !TripEngine.postSettlement()) delay(3000)
                             val a2 = when (c) {
                                 "direct" -> args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret, "p_mode" to "direct")
                                 "new" -> args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret, "p_mode" to "folder", "p_new_folder" to newFolder.ifBlank { "카풀 폴더" })
@@ -1112,7 +1201,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                             }
                             runCatching { rpc.call("choose_settlement", a2) }
                                 .onSuccess { onMessage(if (c == "direct") "동승자 페이지에 계좌번호가 보여요" else "카풀 폴더에 쌓았어요"); onDone() }
-                                .onFailure { onMessage("정산 방법을 저장하지 못했어요: ${it.message}") }
+                                .onFailure { confirming = false; onMessage("정산 방법을 저장하지 못했어요: ${it.message}") }
                         }
                     }
                 }

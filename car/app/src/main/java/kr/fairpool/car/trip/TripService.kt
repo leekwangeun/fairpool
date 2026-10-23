@@ -1,6 +1,9 @@
 package kr.fairpool.car.trip
 
+import ai.pleos.playground.navi.constants.BookmarkType
 import ai.pleos.playground.navi.constants.RouteOption
+import ai.pleos.playground.navi.data.BookmarkInfo
+import ai.pleos.playground.navi.data.RecentDestinationInfo
 import ai.pleos.playground.navi.constants.WaypointIndex
 import ai.pleos.playground.navi.data.NavigationScreenRequest
 import ai.pleos.playground.navi.data.RequestWaypointInfo
@@ -38,8 +41,13 @@ import kr.fairpool.car.data.Place
 import java.util.concurrent.ConcurrentHashMap
 
 /** Thin wrapper so the engine can ask the stock navi for a route without knowing NaviHelper types. */
+/** A place from the stock navi: its bookmarks (집, 회사, 즐겨찾기) and recent destinations. */
+data class NaviPlace(val place: Place, val kind: String)
+
 class NaviBridge(context: Context) {
     private val navi = NaviHelper(context)
+    private val bookmarks = TripEngine.naviBookmarks
+    private val recents = TripEngine.naviRecents
     // NaviHelper calls back on binder threads; everything here runs on the main thread
     private val main = Handler(Looper.getMainLooper())
     private var ready = false
@@ -47,6 +55,26 @@ class NaviBridge(context: Context) {
 
     init {
         navi.addListener(object : NaviHelperEventListener {
+            override fun onBookmarkInfo(list: List<BookmarkInfo>) {
+                main.post { TripEngine.log("내비 즐겨찾기 ${list.size}곳") }
+                // 집, 회사 slots the driver never set come back without a place
+                bookmarks.value = list.filter { it.latitude != 0.0 || it.longitude != 0.0 }.map { b ->
+                    val kind = when (b.category) { BookmarkType.HOME -> "집"; BookmarkType.OFFICE -> "회사"; else -> "즐겨찾기" }
+                    NaviPlace(Place(b.name.ifBlank { kind }, b.latitude, b.longitude, b.address ?: "", b.address ?: ""), kind)
+                }
+            }
+
+            override fun onRecentDestinationInfo(list: List<RecentDestinationInfo>) {
+                main.post { TripEngine.log("내비 최근 목적지 ${list.size}곳") }
+                recents.value = list.filter { it.latitude != 0.0 || it.longitude != 0.0 }.map { r ->
+                    NaviPlace(Place(r.name, r.latitude, r.longitude, r.address ?: "", r.address ?: ""), "최근")
+                }
+            }
+
+            override fun onBookMarkChanged() {
+                main.post { runCatching { navi.getBookmarkInfo() } }
+            }
+
             override fun onRouteStarted(info: RouteStartInfo) {
                 main.post {
                     TripEngine.onToll(info.tollFare.toLong())
@@ -82,6 +110,18 @@ class NaviBridge(context: Context) {
             }
         }
         main.post { if (ready) send() else pending = send }
+    }
+
+    /** L1-10: asks the navi for its bookmarks and recent destinations (answers arrive in [bookmarks], [recents]). */
+    fun requestPlaces() {
+        main.post {
+            val ask = {
+                runCatching { navi.getBookmarkInfo() }.onFailure { TripEngine.log("내비 즐겨찾기 요청 실패: ${it.message}") }
+                runCatching { navi.getRecentDestinationInfo() }.onFailure { TripEngine.log("내비 최근 목적지 요청 실패: ${it.message}") }
+                Unit
+            }
+            if (ready) ask() else pending = ask
+        }
     }
 
     /** "내비에서 보기": brings the stock navi forward on its route overview. */
@@ -124,6 +164,7 @@ class TripService : Service() {
         if (TripEngine.navi == null) {
             TripEngine.navi = runCatching { NaviBridge(applicationContext) }
                 .onFailure { TripEngine.log("내비 연결 실패: ${it.message}") }.getOrNull()
+            TripEngine.navi?.requestPlaces()
         }
         fused = runCatching { FusedLocation(applicationContext).also { it.initialize() } }
             .onFailure { TripEngine.log("위치 SDK 연결 실패: ${it.message}") }.getOrNull()

@@ -124,15 +124,14 @@ fun args(vararg pairs: Pair<String, Any?>): JSONObject {
     return o
 }
 
-/** Demo places for the Figma L3 scenario (MT 귀갓길), used by the demo backend and as fallbacks. */
+/** The plan's scenario A places (동아리 MT 귀갓길), for the offline demo backend and when nothing else is known. */
 object DemoPlaces {
-    val school = Place("학교 정문", 37.5509, 126.9410, "서울 마포구 백범로 35", "마포구 신수동")
-    val sinchon = Place("신촌역 2번 출구", 37.5552, 126.9369, "서울 서대문구 신촌로 90", "서대문구 창천동")
-    val mangwon = Place("망원동", 37.5560, 126.9030, "서울 마포구 망원동", "마포구 망원동")
-    val yeonnam = Place("연남동", 37.5660, 126.9230, "서울 마포구 연남동", "마포구 연남동")
-    val yeonhui = Place("연희동 주민센터", 37.5700, 126.9330, "서울 서대문구 연희로 32", "서대문구 연희동")
-    val eungam = Place("은평구 응암동", 37.5985, 126.9180, "서울 은평구 응암동", "은평구 응암동")
-    val office = Place("거래처 (상암 DMC)", 37.5776, 126.8902, "서울 마포구 상암동", "마포구 상암동")
+    val lodge = Place("가평 MT 숙소", 37.81518, 127.51020, "경기 가평군 가평읍", "가평군 가평읍")
+    val sinchon = Place("신촌역 2번 출구", 37.55534, 126.93662, "서울 서대문구 신촌로 90", "서대문구 창천동")
+    val mangwon = Place("망원역", 37.55591, 126.91025, "서울 마포구 망원동", "마포구 망원동")
+    val yeonnam = Place("연남동 공원", 37.56245, 126.92339, "서울 마포구 연남동", "마포구 연남동")
+    val yeonhui = Place("연희동 주민센터", 37.56679, 126.93121, "서울 서대문구 연희로 32", "서대문구 연희동")
+    val home = Place("응암동 지훈 집", 37.59870, 126.91757, "서울 은평구 응암동", "은평구 응암동")
 }
 
 /**
@@ -175,12 +174,11 @@ object DemoBackend {
                 .put("origin", a.opt("p_origin")).put("destination", a.opt("p_destination"))
                 .put("seats", a.optInt("p_seats", 3)).put("rule", a.optString("p_rule", "shapley"))
                 .put("include_driver", a.optBoolean("p_include_driver", true)).put("status", "preparing")
-                .put("passengers", JSONArray()).put("driver_stops", JSONArray()).put("created_at", now())
+                .put("passengers", JSONArray()).put("created_at", now())
             joinAt[c] = System.currentTimeMillis()
             JSONObject().put("code", c).put("admin_secret", "demo-admin-$c").put("trip_id", c)
         }
         "get_trip_admin" -> tripAdmin(a.optString("p_code"))
-        "set_driver_stops" -> trip(a).put("driver_stops", a.optJSONArray("p_stops") ?: JSONArray()).let { tripAdmin(it.optString("code")) }
         "set_trip_status" -> trip(a).put("status", a.optString("p_status")).let { JSONObject().put("ok", true) }
         "set_join_open", "update_progress", "queue_trip_share", "queue_batch_share", "confirm_records" ->
             JSONObject().put("ok", true)
@@ -270,9 +268,10 @@ object DemoBackend {
         val t = trips[code] ?: throw RpcException("trip_not_found")
         val list = t.getJSONArray("passengers")
         val elapsed = System.currentTimeMillis() - (joinAt[code] ?: 0)
-        val demo = listOf(
-            Triple("민지", DemoPlaces.school, DemoPlaces.mangwon),
-            Triple("서연", DemoPlaces.school, DemoPlaces.yeonnam),
+        // 민지 and 서연 get in where the car starts (no pickup), 태호 at 신촌역
+        val demo = listOf<Triple<String, Place?, Place>>(
+            Triple("민지", null, DemoPlaces.mangwon),
+            Triple("서연", null, DemoPlaces.yeonnam),
             Triple("태호", DemoPlaces.sinchon, DemoPlaces.yeonhui)
         )
         val wanted = minOf(t.optInt("seats", 3), (elapsed / 3000).toInt(), demo.size)
@@ -280,14 +279,14 @@ object DemoBackend {
             while (list.length() < wanted) {
                 val (name, pickup, dropoff) = demo[list.length()]
                 list.put(JSONObject().put("id", UUID.randomUUID().toString()).put("name", name)
-                    .put("pickup", pickup.json()).put("dropoff", dropoff.json()))
+                    .put("pickup", pickup?.json() ?: JSONObject.NULL).put("dropoff", dropoff.json()))
             }
         }
         val waypoints = JSONArray()
-        for (i in 0 until list.length()) {
+        // like the server: every pickup first, then every drop-off, each in joining order
+        for (kind in listOf("pickup", "dropoff")) for (i in 0 until list.length()) {
             val p = list.getJSONObject(i)
-            p.optJSONObject("pickup")?.let { waypoints.put(JSONObject(it.toString()).put("kind", "pickup").put("passenger_id", p.optString("id")).put("name", p.optString("name"))) }
-            p.optJSONObject("dropoff")?.let { waypoints.put(JSONObject(it.toString()).put("kind", "dropoff").put("passenger_id", p.optString("id")).put("name", p.optString("name"))) }
+            p.optJSONObject(kind)?.let { waypoints.put(JSONObject(it.toString()).put("kind", kind).put("passenger_id", p.optString("id")).put("name", p.optString("name"))) }
         }
         val out = JSONObject(t.toString())
         out.put("waypoints", waypoints)

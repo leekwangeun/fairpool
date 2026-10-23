@@ -117,6 +117,9 @@ object TripEngine {
     val state: StateFlow<TripState> = _state
 
     var rpc: Rpc? = null
+    /** L1-10: the stock navi's bookmarks and recent destinations, filled by [NaviBridge]. */
+    val naviBookmarks = MutableStateFlow<List<NaviPlace>>(emptyList())
+    val naviRecents = MutableStateFlow<List<NaviPlace>>(emptyList())
     var navi: NaviBridge? = null
     var fuelPrice: Int = 1700
     var defaultEfficiency: Double = 11.0
