@@ -344,8 +344,6 @@ function stopText(s: Stop, origin: string | null): { title: string; sub?: string
       return { title: '동승자 1명 탐', sub: s.state === 'now' ? eta : undefined };
     case 'other_dropoff':
       return { title: '동승자 1명 내림', sub: s.state === 'now' ? eta : undefined };
-    case 'other_stop':
-      return { title: '들를 곳 1곳', sub: s.state === 'now' ? eta : undefined };
   }
 }
 

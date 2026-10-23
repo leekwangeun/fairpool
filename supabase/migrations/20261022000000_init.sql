@@ -161,9 +161,6 @@ create table public.trips (
   -- live course posted by the car: {stops:[{kind, passenger_id, label, area, time, eta_min,
   -- distance_km, state}], car:{lat,lng}}; filtered per passenger in get_trip
   progress       jsonb,
-  -- places the driver stops at on the way, in order (set_driver_stops): [{id, label, area, address, lat, lng}].
-  -- Passengers see them only as "들를 곳 1곳"; cleared with the stops a day after the trip ends
-  driver_stops   jsonb,
   -- once the trip has started, new passengers may join only while the car shows the invite QR again
   -- while parked (set_join_open); the window closes by itself after 10 minutes
   join_open_until timestamptz,
@@ -410,14 +407,12 @@ language sql stable set search_path = public, extensions as $$
                                                      else s -> 'label' end,
                                        'time', s -> 'time', 'eta_min', s -> 'eta_min',
                                        'distance_km', s -> 'distance_km', 'state', s -> 'state')
-                  when s ->> 'kind' = 'driver_stop' then
-                    jsonb_build_object('kind', 'other_stop', 'eta_min', s -> 'eta_min', 'state', s -> 'state')
                   else
                     jsonb_build_object('kind', 'other_' || (s ->> 'kind'),
                                        'time', s -> 'time', 'eta_min', s -> 'eta_min', 'state', s -> 'state')
                 end order by ord), '[]'::jsonb)
               from jsonb_array_elements(p -> 'stops') with ordinality as x(s, ord)
-              where s ->> 'kind' in ('start', 'pickup', 'dropoff', 'driver_stop')))
+              where s ->> 'kind' in ('start', 'pickup', 'dropoff')))
   end
 $$;
 
@@ -786,9 +781,8 @@ begin
     'carpool_code', (select code from public.carpools where id = t.carpool_id),
     'passengers', public._passengers_admin(t.id),
     'progress', t.progress,
-    'driver_stops', coalesce(t.driver_stops, '[]'::jsonb),
     -- every place the car has to pass, for NaviHelper waypoints. The car decides the route (L3); the list
-    -- comes in a fixed order: pickups, then drop-offs (each in joining order), then the driver's stops
+    -- comes in a fixed order: pickups, then drop-offs, each in joining order
     'waypoints', (select coalesce(jsonb_agg(w order by g, k), '[]'::jsonb) from (
                     select jsonb_build_object('kind', 'pickup', 'passenger_id', p.id, 'name', p.name) || p.pickup as w,
                            1 as g, extract(epoch from p.joined_at) as k
@@ -798,10 +792,7 @@ begin
                     select jsonb_build_object('kind', 'dropoff', 'passenger_id', p.id, 'name', p.name) || p.dropoff,
                            2, extract(epoch from p.joined_at)
                     from public.trip_passengers p
-                    where p.trip_id = t.id and p.dropoff is not null and p.record_deleted_at is null
-                    union all
-                    select jsonb_build_object('kind', 'driver_stop', 'stop_id', x ->> 'id') || (x - 'id'), 3, n
-                    from jsonb_array_elements(coalesce(t.driver_stops, '[]'::jsonb)) with ordinality as y(x, n)) z),
+                    where p.trip_id = t.id and p.dropoff is not null and p.record_deleted_at is null) z),
     'settlement', (select payload from public.settlements where trip_id = t.id),
     'settle_mode', t.settle_mode,
     'folder', (select jsonb_build_object('code', f.code, 'name', f.name, 'status', b.status)
@@ -1060,33 +1051,6 @@ begin
     dropoff = case when dropoff ? 'lat' then dropoff || jsonb_build_object(
                'lat', round((dropoff ->> 'lat')::numeric, 2), 'lng', round((dropoff ->> 'lng')::numeric, 2)) else dropoff end
   where trip_id = t.id;
-  return public.get_trip_admin(p_code, p_admin_secret);
-end $$;
-
--- 운전자가 들를 곳 (L3, picked on the car from the navi favourites or recent destinations): the driver's
--- own stops on the way, in order. The whole list is sent each time, so adding, removing and reordering
--- are the same call. They join the passengers' places in `waypoints`; passengers see them only as
--- "들를 곳 1곳", and the car counts the detour as the driver's own part of the settlement.
-create or replace function public.set_driver_stops(p_code text, p_admin_secret text, p_stops jsonb) returns jsonb
-language plpgsql security definer set search_path = public, extensions as $$
-declare
-  t public.trips := public._trip_admin(p_code, p_admin_secret);
-  list jsonb := coalesce(p_stops, '[]'::jsonb);
-begin
-  if t.status not in ('preparing', 'in_progress') then raise exception 'trip_closed'; end if;
-  if jsonb_typeof(list) <> 'array' then raise exception 'bad_stops'; end if;
-  if jsonb_array_length(list) > 5 then raise exception 'too_many_stops'; end if;
-  if exists (select 1 from jsonb_array_elements(list) x
-             where nullif(trim(x ->> 'label'), '') is null or not (x ? 'lat' and x ? 'lng')) then
-    raise exception 'place_needs_location';
-  end if;
-  update public.trips set driver_stops = (
-    select nullif(coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
-             'id', coalesce(x ->> 'id', gen_random_uuid()::text), 'label', trim(x ->> 'label'),
-             'area', x -> 'area', 'address', x -> 'address', 'lat', x -> 'lat', 'lng', x -> 'lng'))
-             order by ord), '[]'::jsonb), '[]'::jsonb)
-    from jsonb_array_elements(list) with ordinality as y(x, ord))
-  where id = t.id;
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
@@ -2118,8 +2082,8 @@ begin
   where p.trip_id = t.id and t.ended_at < now() - interval '24 hours'
     and (p.pickup is not null or p.dropoff is not null or p.exact_stops is not null);
   get diagnostics n_loc = row_count;
-  update public.trips set progress = null, driver_stops = null
-  where ended_at < now() - interval '24 hours' and (progress is not null or driver_stops is not null);
+  update public.trips set progress = null
+  where ended_at < now() - interval '24 hours' and progress is not null;
   update public.trips set status = 'cancelled', ended_at = now()
   where (status = 'preparing' and created_at < now() - interval '7 days')
      or (status = 'in_progress' and coalesce(started_at, created_at) < now() - interval '7 days');
@@ -2145,7 +2109,7 @@ declare
     'get_bank_account', 'set_bank_account', 'get_driver_info', 'set_driver_info',
     'queue_trip_share', 'queue_batch_share',
     'get_settle_page', 'verify_settle_page', 'report_settle_issue', 'remove_member_place',
-    'get_trip_admin', 'set_trip_status', 'set_join_open', 'set_driver_stops', 'update_progress', 'mark_passenger', 'post_settlement',
+    'get_trip_admin', 'set_trip_status', 'set_join_open', 'update_progress', 'mark_passenger', 'post_settlement',
     'choose_settlement', 'mark_paid', 'list_folders', 'get_folder_admin', 'request_batch',
     'cancel_batch_request', 'mark_batch_paid', 'create_folder',
     'save_carpool', 'recreate_trip', 'get_carpool', 'archive_carpool', 'archive_folder',

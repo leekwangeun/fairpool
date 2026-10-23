@@ -164,8 +164,7 @@ export type Settlement = {
 };
 
 export type Stop = {
-  // other_stop: a place the driver stops at, shown without where it is
-  kind: 'start' | 'my_pickup' | 'my_dropoff' | 'other_pickup' | 'other_dropoff' | 'other_stop';
+  kind: 'start' | 'my_pickup' | 'my_dropoff' | 'other_pickup' | 'other_dropoff';
   label?: string;
   time?: string;
   eta_min?: number;

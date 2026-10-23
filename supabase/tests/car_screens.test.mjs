@@ -266,52 +266,18 @@ test('a car takes up to 4 passengers, 5 people with the driver', async () => {
   await assert.rejects(db.query(`update public.trips set seats = 6 where code = $1`, [t.code]), /check/);
 });
 
-test('L3: the driver\'s own stops join the waypoints, and passengers see them only as a stop', async () => {
+test('L3: waypoints list the passengers\' pickups, then drop-offs, in joining order', async () => {
   const db = await freshDb();
   const { vehicle_secret } = await driverWithCar(db);
-  const t = await rpc(db, 'create_trip', { p_title: '퇴근', p_vehicle_secret: vehicle_secret });
-  await rpc(db, 'join_trip', { p_code: t.code, p_device_key: device(1), p_name: '태호',
+  const t = await rpc(db, 'create_trip', { p_title: 'MT 귀갓길', p_vehicle_secret: vehicle_secret,
+                                          p_origin: place('가평 MT 숙소'), p_destination: place('응암동') });
+  await rpc(db, 'join_trip', { p_code: t.code, p_device_key: device(1), p_name: '민지', p_dropoff: place('망원역') });
+  await rpc(db, 'join_trip', { p_code: t.code, p_device_key: device(2), p_name: '서연', p_dropoff: place('연남동') });
+  await rpc(db, 'join_trip', { p_code: t.code, p_device_key: device(3), p_name: '태호',
                                p_pickup: place('신촌역'), p_dropoff: place('연희동') });
-  const set = (stops) => rpc(db, 'set_driver_stops', { p_code: t.code, p_admin_secret: vehicle_secret, p_stops: stops });
-
-  // from the navi favourites and recent destinations
-  let a = await set([{ label: '거래처', address: '서울 중구', lat: 37.56, lng: 126.98 }, place('세탁소')]);
-  assert.deepEqual(a.driver_stops.map((x) => x.label), ['거래처', '세탁소']);
-  assert.ok(a.driver_stops.every((x) => x.id));
-  // a fixed order: pickups, drop-offs, then the driver's stops in their order
-  assert.deepEqual(a.waypoints.map((w) => w.kind), ['pickup', 'dropoff', 'driver_stop', 'driver_stop']);
-  assert.deepEqual(a.waypoints.filter((w) => w.kind === 'driver_stop').map((w) => w.label), ['거래처', '세탁소']);
-  assert.equal(a.waypoints.find((w) => w.kind === 'pickup').label, '신촌역');
-  assert.ok(a.waypoints.filter((w) => w.kind === 'driver_stop').every((w) => w.lat && w.stop_id));
-
-  // reorder and remove are the same call; ids stay
-  const [first, second] = a.driver_stops;
-  a = await set([second, first]);
-  assert.deepEqual(a.driver_stops.map((x) => x.id), [second.id, first.id]);
-  a = await set([first]);
-  assert.deepEqual(a.driver_stops.map((x) => x.label), ['거래처']);
-  await assert.rejects(set([{ label: '어딘가' }]), /place_needs_location/);
-  await assert.rejects(set(Array.from({ length: 6 }, (_, i) => place(`곳${i}`))), /too_many_stops/);
-
-  // the car's course: passengers see "들를 곳" without where it is
-  await rpc(db, 'set_trip_status', { p_code: t.code, p_admin_secret: t.admin_secret, p_status: 'in_progress' });
-  await rpc(db, 'update_progress', { p_code: t.code, p_admin_secret: t.admin_secret, p_progress: { stops: [
-    { kind: 'start', label: '회사', state: 'done' },
-    { kind: 'driver_stop', label: '거래처', eta_min: 5, state: 'now' },
-    { kind: 'pickup', passenger_id: (await admin(db, t)).passengers[0].id, label: '신촌역', eta_min: 12, state: 'next' },
-  ] } });
-  const v = await rpc(db, 'get_trip', { p_code: t.code, p_device_key: device(1) });
-  const stop = v.progress.stops.find((s) => s.kind === 'other_stop');
-  assert.deepEqual(stop, { kind: 'other_stop', eta_min: 5, state: 'now' });
-  assert.ok(!JSON.stringify(v).includes('거래처'));
-
-  // gone with the other places a day after the trip ends
-  const id = (await admin(db, t)).passengers[0].id;
-  await rpc(db, 'post_settlement', { p_code: t.code, p_admin_secret: t.admin_secret,
-                                     p_payload: { total: 5000, shares: [{ passenger_id: id, name: '태호', amount: 1500 },
-                                                                        { passenger_id: null, name: '지훈', role: 'driver', amount: 3500 }] } });
-  await assert.rejects(set([place('세탁소')]), /trip_closed/);
-  await db.query(`update public.trips set ended_at = now() - interval '25 hours' where code = $1`, [t.code]);
-  await rpc(db, 'purge_old_locations');
-  assert.deepEqual((await admin(db, t)).driver_stops, []);
+  const a = await admin(db, t);
+  assert.deepEqual(a.waypoints.map((w) => `${w.kind} ${w.name} ${w.label}`),
+                   ['pickup 태호 신촌역', 'dropoff 민지 망원역', 'dropoff 서연 연남동', 'dropoff 태호 연희동']);
+  assert.ok(a.waypoints.every((w) => w.lat && w.lng && w.passenger_id));
+  assert.equal(a.driver_stops, undefined, 'the driver adds no stops of their own');
 });
