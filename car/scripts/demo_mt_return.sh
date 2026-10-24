@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 시연 시나리오 A "동아리 MT 귀갓길"을 Pleos 에뮬레이터에서 자동으로 재현한다.
+# 시연 시나리오 "동아리 MT 귀갓길"을 Pleos 에뮬레이터에서 자동으로 재현한다.
 # Virtual Console(좌석, 문, 기어, 주행거리)만 바꾸고, 차 앱 화면은 adb 탭으로 넘긴다(2560x1440 기준).
 #
 # 준비: 에뮬레이터 실행, devserver 실행(시드 운행이 준비 상태), 차 앱 설정의 차 비밀값 = seed.json의 vehicle_secret

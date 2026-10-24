@@ -1,8 +1,8 @@
-// Demo data that matches the demo video script and the plan's calculation examples:
+// Demo data for the demo video:
 // - 지훈's car with driver info and an account (페어은행)
-// - the 출근 카풀 folder: 16 October mornings with different riders (plan 3.4 example 3), not requested yet
+// - the 출근 카풀 folder: 16 October mornings with different riders, not requested yet
 // - favourites "출근 카풀" and "동아리 MT 가는 길"
-// - "동아리 MT 귀갓길" ready to leave (plan 3.4 example 1, scenario A); its expected settlement is in seed.json
+// - "동아리 MT 귀갓길" ready to leave; its expected settlement is in seed.json
 // Secrets and codes go to data/seed.json.
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { callRpc, defaultDataDir, openDb } from './db.mjs';
 
 const place = (label, area, lat, lng) => ({ label, area, lat, lng });
-// The MT trip uses the points the plan's distance table was measured with (OSRM, plan 3.4 example 1).
+// The MT trip uses the points its OSRM distance table was measured with.
 const P = {
   home: place('응암동 지훈 집', '은평구 응암동', 37.59870, 126.91757),
   office: place('광화문 회사', '종로구 세종로', 37.5714, 126.9768),
@@ -36,14 +36,14 @@ export const devices = {
 };
 const phone4 = { 수진: '1111', 민호: '2222', 지은: '3333', 태호: '5678', 서연: '4444', 민지: '6666' };
 
-// plan 3.4 example 3: who rides, actual distance, total, each share (지훈 = driver), km each rider was in the car
+// the four commute patterns: actual distance, total, each share (지훈 = driver), km each rider was in the car
 const COMMUTE = {
   A: { km: 46, total: 5590, shares: { 수진: 2430, 지훈: 3160 }, rode: { 수진: 34 } },
   B: { km: 52, total: 6310, shares: { 수진: 1900, 민호: 1780, 지훈: 2630 }, rode: { 수진: 40, 민호: 32 } },
   C: { km: 56, total: 6800, shares: { 수진: 1670, 민호: 1300, 지은: 1430, 지훈: 2400 }, rode: { 수진: 44, 민호: 36, 지은: 31 } },
   D: { km: 50, total: 6070, shares: { 민호: 1600, 지은: 1660, 지훈: 2810 }, rode: { 민호: 36, 지은: 31 } },
 };
-// the 16 weekday mornings of October up to today: A x6, B x5, C x3, D x2
+// 16 October mornings: A x6, B x5, C x3, D x2
 const COMMUTE_DAYS = [
   ['2026-10-01', 'A'], ['2026-10-02', 'A'], ['2026-10-05', 'A'], ['2026-10-06', 'A'], ['2026-10-07', 'A'], ['2026-10-08', 'A'],
   ['2026-10-09', 'B'], ['2026-10-12', 'B'], ['2026-10-13', 'B'], ['2026-10-14', 'B'], ['2026-10-15', 'B'],
@@ -52,7 +52,7 @@ const COMMUTE_DAYS = [
 ];
 const RIDER_PLACE = { 수진: P.sujin, 민호: P.minho, 지은: P.jieun };
 
-// plan 3.4 example 1 (scenario A): what the car should compute for the MT 귀갓길 trip
+// what the car should compute for the MT 귀갓길 trip
 const MT_RETURN_EXPECTED = {
   total: 15360,
   toll: 3000,

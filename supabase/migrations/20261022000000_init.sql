@@ -820,10 +820,6 @@ begin
                from public.trip_issues i where i.trip_id = t.id));
 end $$;
 
--- Deleting is for the driver only (car app or driver page); passengers ask the driver outside the app.
--- Before boarding is recorded: the place leaves the stops (the car asks NaviHelper for the whole route
--- again with requestRouteWithWaypoints) and the place kept for the favourite goes too. After boarding
--- the place is part of the ride record and can only be corrected until the settlement is complete.
 -- A passenger who drops out tells the driver, and the driver takes them off the trip (driver page, or the
 -- x on the car's invitation screen L2/P2). Only before boarding is recorded; their stops leave the route,
 -- so the car asks NaviHelper for the whole route again.
@@ -843,6 +839,10 @@ begin
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
+-- Deleting is for the driver only (car app or driver page); passengers ask the driver outside the app.
+-- Before boarding is recorded: the place leaves the stops (the car asks NaviHelper for the whole route
+-- again with requestRouteWithWaypoints) and the place kept for the favourite goes too. After boarding
+-- the place is part of the ride record and can only be corrected until the settlement is complete.
 create or replace function public.remove_passenger_place(p_code text, p_admin_secret text, p_passenger_id uuid)
 returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$

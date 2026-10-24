@@ -124,7 +124,7 @@ fun args(vararg pairs: Pair<String, Any?>): JSONObject {
     return o
 }
 
-/** The plan's scenario A places (동아리 MT 귀갓길), for the offline demo backend and when nothing else is known. */
+/** The demo places (동아리 MT 귀갓길), for the offline demo backend and when nothing else is known. */
 object DemoPlaces {
     val lodge = Place("가평 MT 숙소", 37.81518, 127.51020, "경기 가평군 가평읍", "가평군 가평읍")
     val sinchon = Place("신촌역 2번 출구", 37.55534, 126.93662, "서울 서대문구 신촌로 90", "서대문구 창천동")

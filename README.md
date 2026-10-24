@@ -14,7 +14,7 @@
 
 | 폴더 | 내용 |
 |---|---|
-| `apk/` | 제출용 release APK (`팀명_페어풀_release.apk`) |
+| `apk/` | 제출용 release APK (`FairPool_페어풀_release.apk`) |
 | `car/` | 차량 앱 (Kotlin, Pleos Connect) |
 | `web/` | 휴대폰 웹: 동승자 페이지, 운전자 휴대폰의 차 연결과 보내기 (React, TypeScript, Vite, Tailwind CSS, MapLibre) |
 | `supabase/migrations/` | 운행 서버의 DB 테이블과 서버 함수(SQL) |
@@ -27,10 +27,10 @@
 ### 1. 차량 앱 (APK)
 
 1. Pleos Connect 에뮬레이터(또는 차량)를 켭니다.
-2. `apk/팀명_페어풀_release.apk` 를 설치합니다.
+2. `apk/FairPool_페어풀_release.apk` 를 설치합니다.
 
 ```bash
-adb install apk/팀명_페어풀_release.apk
+adb install apk/FairPool_페어풀_release.apk
 ```
 
 3. 차 앱이 붙을 서버를 켭니다(아래 2). 에뮬레이터에서는 PC의 개발 서버가 `http://10.0.2.2:54321` 로 보입니다.
@@ -60,14 +60,17 @@ npm run dev     # http://localhost:5173
 
 - 아무 설정 없이 실행하면 같은 SQL을 브라우저 안에서 돌리는 **데모 모드**로 동작합니다(오른쪽 위 "데모 모드" 표시). 차 화면을 대신하는 시연용 페이지(`/`, `/new`, `/d`, `/f`)의 "시연 도구"로 차가 보내는 진행 상황과 정산을 흉내 낼 수 있습니다. 이 페이지들은 실제 사용자 경로에는 나오지 않습니다.
 - 로컬 개발 서버에 붙이려면 `web/.env.local` 에 `VITE_API_URL=http://localhost:54321` 을 넣습니다.
-- 같은 와이파이의 휴대폰에서 열려면 개발 서버가 출력하는 PC 주소(`http://<PC의 IP>:5173`)로 접속합니다.
+- 같은 와이파이의 휴대폰에서 열려면 `web/.env.local` 의 두 값을 PC 주소로 넣고(`VITE_API_URL=http://<PC의 IP>:54321`, `VITE_PUBLIC_BASE_URL=http://<PC의 IP>:5173`), 휴대폰에서 `http://<PC의 IP>:5173` 으로 접속합니다. `localhost` 로 두면 휴대폰이 자기 자신에게 요청을 보내고, QR에도 휴대폰이 열 수 없는 주소가 찍힙니다.
 
 ### 4. 테스트
 
+저장소 맨 위 폴더에서 실행합니다.
+
 ```bash
-cd supabase && npm install && npm test     # 서버 함수 47개 시나리오
-cd devserver && npm install && npm test    # 개발 서버 HTTP 응답
-cd web && npm run build                     # 타입 검사와 빌드
+(cd supabase && npm install && npm test)               # 서버 함수 47개 시나리오
+(cd devserver && npm install && npm test)              # 개발 서버 HTTP 응답
+(cd web && npm install && npm run build)               # 타입 검사와 빌드
+gradle -p car testDebugUnitTest                        # 차 앱 정산 계산(JDK 21, Android SDK 35)
 ```
 
 ## 테스트 환경과 필요한 설정
@@ -109,6 +112,17 @@ cd web && npm run build                     # 타입 검사와 빌드
 - 운행을 만든 차만 관리 비밀값을 가집니다. 동승자는 코드로 참여만 할 수 있습니다.
 - 한 운행에는 동승자 4명까지(운전자 포함 5명) 탈 수 있습니다.
 
+## 화면 번호
+
+README와 `docs/` 에 나오는 화면 번호는 피그마 시안의 화면 이름입니다.
+
+| 앞 글자 | 화면 | 예 |
+|---|---|---|
+| L | 차 화면, 가로(단독 실행 1682×1210) | L1 운행 만들기, L1-9 운전자 정보 입력, L2 초대 QR, L5 탑승/하차 확인 카드, L6 도착 정산 |
+| P | 차 화면, 세로(분할 화면 841×1210). 같은 번호의 L 화면과 같은 내용 | P2 초대 QR |
+| M | 동승자 휴대폰 웹 | M1 초대와 참여, M3 바로 정산, M6 카풀 폴더 정산 페이지 |
+| N | 순정 내비 | N1 내비 안내 |
+
 ## 화면 (휴대폰 웹)
 
 동승자 화면은 피그마 시안 "동승자 휴대폰 웹"(M1~M6-1)을 구현했습니다.
@@ -135,21 +149,29 @@ cd web && npm run build                     # 타입 검사와 빌드
 
 1. supabase.com에서 프로젝트를 만듭니다(무료 요금제).
 2. Database > Extensions에서 `pg_cron`을 켭니다(끝난 운행의 위치 자동 삭제용).
-3. 마이그레이션을 올립니다.
+3. 마이그레이션을 올립니다. SQL Editor에 `supabase/migrations/` 의 두 파일(`20261022000000_init.sql`, `20261022000100_retention_cron.sql`)을 이 순서로 붙여 넣고 실행하거나, CLI로 올립니다.
 
 ```bash
 npx supabase login
+npx supabase init          # supabase/config.toml이 없을 때 한 번
 npx supabase link --project-ref <프로젝트 ref>
 npx supabase db push
 ```
 
-4. Settings > API에서 Project URL과 anon key를 확인합니다. anon key로는 테이블을 직접 읽을 수 없고, 정해진 함수만 부를 수 있습니다.
+4. Settings > API Keys에서 Project URL과 anon key(Legacy API Keys 탭)를 확인합니다. 차 앱과 웹은 이 키를 `apikey` 와 `Authorization: Bearer` 헤더로 보냅니다. anon key로는 테이블을 직접 읽을 수 없고, 정해진 함수만 부를 수 있습니다.
+5. 시연 데이터(`devserver` 의 시드)는 로컬 개발 서버에만 들어갑니다. Supabase에서는 차 화면에서 운행을 새로 만듭니다.
 
 ### 2. Vercel (휴대폰 웹)
 
 1. vercel.com에서 이 GitHub 저장소를 가져옵니다.
 2. Root Directory를 `web`으로 지정합니다.
-3. 환경 변수 `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_PUBLIC_BASE_URL` 을 넣습니다.
+3. 환경 변수 `VITE_SUPABASE_URL`(Project URL), `VITE_SUPABASE_ANON_KEY`(anon key), `VITE_PUBLIC_BASE_URL`(Vercel 사이트 주소, QR에 찍힘)을 넣습니다.
+
+### 3. 차 앱을 배포한 서버에 붙이기
+
+1. 다른 서버에 붙였던 적이 있으면 앱 데이터를 지웁니다(`adb shell pm clear kr.fairpool.car`). 차 비밀값은 서버마다 따로 발급됩니다.
+2. 첫 화면 위쪽의 "페어풀(FairPool)"을 눌러 설정을 열고, 등록하기 전에 서버 주소(Project URL), anon key, QR 사이트 주소(Vercel 주소)를 넣고 데모 모드를 끕니다.
+3. 등록합니다. 이때 서버에 닿지 않으면 데모 모드로 바뀌므로, 화면 위쪽에 "데모" 표시가 없는지 확인합니다.
 
 ## 외부 데이터
 
@@ -162,7 +184,7 @@ npx supabase db push
 - 동승자의 탈 곳과 내릴 곳은 운전자(와 연결된 차)만 봅니다. 다른 동승자에게는 "동승자 1명 내림"처럼 가려서 보이고, 운전자의 목적지도 보이지 않습니다.
 - 차 위치는 그 동승자가 타기 전까지만 보입니다.
 - 정산 결과는 그 운행에 참여한 휴대폰에만 보입니다. 다른 사람의 몫은 금액만 보이고 어디서 타고 내렸는지는 빠집니다.
-- 정산이 끝나면 좌표를 동네 수준(약 1km)으로 줄이고, 24시간 뒤에는 장소를 지웁니다. 즐겨찾기 카풀로 저장된 운행만 다음 운행을 위해 탈 곳과 내릴 곳을 남깁니다. 참여 화면에서 미리 알립니다. 지우는 기능은 운전자에게만 있고, 동승자는 앱 밖에서 운전자에게 말하면 됩니다. 일회성 운행은 남기지 않습니다.
+- 정산이 끝나면 좌표를 동네 수준(약 1km)으로 줄이고, 24시간 뒤에는 장소와 코스를 지웁니다. 정산 내역에는 구간 이름(예: "가평 MT 숙소 → 망원동")만 남습니다. 즐겨찾기 카풀로 저장된 운행만 다음 운행을 위해 탈 곳과 내릴 곳을 남깁니다. 참여 화면에서 미리 알립니다. 지우는 기능은 운전자에게만 있고, 동승자는 앱 밖에서 운전자에게 말하면 됩니다. 일회성 운행은 남기지 않습니다.
 - 운행 기록은 정산이 완료될 때까지 지울 수 없고 정정만 합니다. 정산이 완료되면 운전자가 탑승 기록을 지울 수 있고, 지워도 정산 금액과 정정 내역은 남고 그 몫은 이름 없이 "기록을 지운 동승자"로 표시돼 합계가 맞습니다.
 - 운전자 이름, 휴대폰 뒤 4자리, 받을 계좌는 주차 중 차 화면(L1-9)에서만 넣습니다. 계좌는 동의한 경우에만 암호화해 저장하고, 실제로 탄 사람의 정산이 정산 중일 때만 보여 줍니다. 정산이 끝나면 그 사람 페이지에서 내려갑니다.
 

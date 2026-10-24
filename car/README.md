@@ -5,7 +5,7 @@
 ## 빌드
 
 - JDK 21, Gradle 8.10.2, Android SDK 35 (Android Studio 내장 JBR 25는 Gradle이 거부함)
-- 저장소 경로에 한글이 있으면 aapt2가 실패하므로 빌드 결과는 `C:/dev/build/fairpool-car/app`에 만든다(`app/build.gradle.kts`의 `buildDirectory`). 다른 PC에서는 이 줄을 지우거나 바꾼다.
+- 윈도우에서는 저장소 경로에 한글이 있으면 aapt2가 실패하므로 빌드 결과를 `C:/dev/build/fairpool-car/app`에 만든다(`app/build.gradle.kts`의 `buildDirectory`). 맥과 리눅스에서는 기본 위치(`car/app/build`)에 만든다.
 
 ```bash
 gradle -p car assembleRelease
@@ -17,7 +17,7 @@ release는 디버그 키로 서명한다(시연용).
 ## 에뮬레이터에서 실행
 
 ```bash
-adb install -r C:/dev/build/fairpool-car/app/outputs/apk/release/app-release.apk
+adb install -r C:/dev/build/fairpool-car/app/outputs/apk/release/app-release.apk   # 맥, 리눅스는 car/app/build/outputs/apk/release/app-release.apk
 adb shell am start --user 10 -n kr.fairpool.car/.MainActivity
 ```
 
@@ -31,9 +31,9 @@ adb shell am start --user 10 -n kr.fairpool.car/.MainActivity
 bash car/scripts/demo_mt_return.sh
 ```
 
-- 시드의 "동아리 MT 귀갓길"(준비 중인 운행 첫 줄)을 열고, Virtual Console로 좌석, 문, 기어, 주행거리만 바꿔 대본 순서대로 진행한다. 조수석 서연, 뒷좌석 오른쪽 민지가 숙소에서 타고, 신촌역(69.6km)에서 뒷좌석 왼쪽 태호가 탄다. 72.4km 민지, 74.3km 서연, 75.3km 태호가 내리고 80.0km에 도착한다. 도착 정산에서 통행료를 3,000원으로 고친 뒤 바로 정산으로 확정한다.
+- 시드의 "동아리 MT 귀갓길"(준비 중인 운행 첫 줄)을 열고, Virtual Console로 좌석, 문, 기어, 주행거리만 바꿔 아래 순서대로 진행한다. 조수석 서연, 뒷좌석 오른쪽 민지가 숙소에서 타고, 신촌역(69.6km)에서 뒷좌석 왼쪽 태호가 탄다. 72.4km 민지, 74.3km 서연, 75.3km 태호가 내리고 80.0km에 도착한다. 도착 정산에서 통행료를 3,000원으로 고친 뒤 바로 정산으로 확정한다.
 - Virtual Console은 에뮬레이터 안의 웹 서버(`adb forward tcp:8088 tcp:8088`)이고, 브라우저 세션이 살아 있을 때만 값을 받는다. 스크립트가 세션 신호를 대신 보낸다. 주행거리는 줄일 수 없어서 매번 다음 100km 단위에서 시작한다.
-- 수동 탑승/하차 버튼은 센서가 놓쳤을 때를 위해 주행 화면에 그대로 있다.
+- 센서가 놓쳤을 때를 위해 주행 화면에 수동 탑승/하차 버튼이 있다.
 
 ### 실감 버전 (차가 지도 위를 달림)
 
@@ -41,7 +41,7 @@ bash car/scripts/demo_mt_return.sh
 node car/scripts/demo_drive.mjs
 ```
 
-- `route_mt_return.json`(기획서 좌표로 받은 OSRM 도로 경로, `node car/scripts/build_route.mjs`로 다시 만듦)을 에뮬레이터 GPS(`adb emu geo fix`)로 재생한다. 가평 → 신촌역 고속도로는 빨리 감고(약 40초), 서울 구간은 천천히 보여 준다. 전체 약 4분 30초.
+- `route_mt_return.json`(시연 장소 좌표로 받은 OSRM 도로 경로, `node car/scripts/build_route.mjs`로 다시 만듦)을 에뮬레이터 GPS(`adb emu geo fix`)로 재생한다. 가평 → 신촌역 고속도로는 빨리 감고(약 40초), 서울 구간은 천천히 보여 준다. 전체 약 4분 30초.
 - Virtual Console로 속도계(`/vehicle/controls?speed=`)와 주행거리를 GPS 진행에 맞춰 올리고, 정차 지점에 닿으면 기어 P, 문, 좌석을 바꾼다. 정차마다 확인 카드 → 10초 뒤 내비에 다음 경로(내비 화면 4초) → 페어풀로 돌아와 다시 출발한다.
 - 화면을 3분 단위로 녹화해(`adb shell screenrecord`) 캡처 폴더에 받는다. `RECORD=0`이면 녹화하지 않는다.
 - 페어풀 화면은 주행 중에도 보이도록 `distractionOptimized`를 선언했다(주행 화면은 지도, 다음 정차, 확인 카드만 보여 줌). 선언이 없으면 속도가 0보다 클 때 "주행 중에는 사용할 수 없습니다"로 가려진다.
@@ -58,7 +58,7 @@ node car/scripts/demo_drive.mjs
 | NaviHelper 3.0.5 | 경유지 2곳 + 목적지 경로, 통행료, 내비에서 보기 | 경로 요청과 통행료 수신 |
 | TextToSpeech 3.3.1 | L5 확인 카드 한 번 읽기, L6 총비용 안내 | 온디바이스 음성으로 재생됨(서버 모드는 앱 자격 정보가 없어 자동 전환) |
 | SpeechToText 3.3.1 | L5 카드에서 "맞아", "잘못 인식"만 듣기 | 인식 요청과 녹음 시작까지 확인, 말소리 인식은 마이크 입력이 없어 미확인 |
-| FusedLocation 1.1.3 | 차 위치(지도, 동승자 페이지), 정차 도착 판단, 탑승, 하차 위치 | 에뮬레이터 GPS를 그대로 따라옴 |
+| FusedLocation 1.1.3 | 차 위치(지도, 동승자 페이지), 운행 출발지, 정차 도착 판단 | 에뮬레이터 GPS를 그대로 따라옴 |
 
 권한: `pleos.car.permission.TTS_SERVICE`, `STT_SERVICE`(normal), `pleos.car.permission.FUSED_LOCATION`, `RECORD_AUDIO`(실행 중 허용).
 
@@ -84,7 +84,7 @@ Vehicle SDK 2.3.2는 SEAT_OCCUPANCY를 `value == 1`로 바꿔 넘기는데 VHAL�
 ## 알려진 제약
 
 - 내비는 경로를 받을 때마다 앞으로 나온다. 그래서 탑승/하차 뒤 다음 경로는 확인 카드가 사라진 뒤(10초) 보낸다. 내비가 앞에 있는 동안 다음 정차의 확인 카드는 가려진다. 정차 때 앱이 스스로 앞으로 나오게 해 봤지만 일반 앱은 백그라운드 화면 전환이 막혀 있다(`BAL_BLOCK`, 내비는 SYSTEM_ALERT_WINDOW가 있어 허용). 실차에서는 화면 오른쪽 창 바를 끌어 분할 화면으로 두면 내비와 카드가 함께 보인다. 시연 스크립트는 정차마다 앱을 다시 앞으로 부른다.
-- 사람별 몫은 함께 탄 조합마다 OSRM 공개 서버에서 받은 도로 거리(0.1km 단위)로 계산한다. 시드 장소를 기획서 표를 만든 좌표로 두면 조합 거리 15개가 표와 같고, 시나리오 A 결과도 기획서 예시(지훈 5,170 / 민지 5,110 / 서연 4,820 / 태호 260원, 합계 15,360원)와 같다. 장소 좌표가 다르면 금액도 수십 원 달라진다.
+- 사람별 몫은 함께 탄 조합마다 OSRM 공개 서버에서 받은 도로 거리(0.1km 단위)로 계산한다. 시드의 시연 장소로 계산하면 "동아리 MT 귀갓길"은 지훈 5,170원, 민지 5,110원, 서연 4,820원, 태호 260원(합계 15,360원)이다. 장소 좌표가 다르면 금액도 수십 원 달라진다.
 - 출발할 때 계획된 코스로 조합 거리표를 미리 받아 둔다. 도착 후 길찾기가 안 되면 이 표로 계산하고, 설정의 "시연 대비" 스위치를 켜면 처음부터 이 표를 쓴다. 정산에 쓴 조합 거리표는 post_settlement의 `coalitions`(members, km)와 `distance_source`(osrm, saved, segments)로 함께 저장되고, 도착 정산 화면의 총 거리 칸을 누르면 보인다.
 - 주행거리가 움직이지 않으면 조합 전체의 도로 거리를 쓰고, 길찾기도 안 되면 직선거리에 1.3을 곱한다.
 - 에뮬레이터 내비는 차 위치가 실제 경로와 달라 통행료를 엉뚱하게 알려 준다. 도착 정산 화면은 계산 결과를 먼저 미리 보여 주고, 통행료 칸을 눌러 고친 뒤 "확정하고 완료"를 누를 때 한 번만 `post_settlement`로 올린다.

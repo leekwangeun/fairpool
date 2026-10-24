@@ -71,7 +71,7 @@ test('errors come back as PostgREST does: 400 with code and message, 404 for unk
   });
 });
 
-test('the demo data matches the plan: the 출근 카풀 folder of example 3 and the MT trip ready to go', async () => {
+test('the demo data holds the 출근 카풀 folder and the MT trip ready to go', async () => {
   const db = await openDb(null);
   const info = await seed(db);
   const car = await callRpc(db, 'get_vehicle_trips', { p_vehicle_secret: info.vehicle_secret });
@@ -80,7 +80,7 @@ test('the demo data matches the plan: the 출근 카풀 folder of example 3 and 
   assert.deepEqual(car.carpools.map((c) => c.title).sort(), ['동아리 MT 가는 길', '출근 카풀']);
   assert.equal((await callRpc(db, 'get_bank_account', { p_vehicle_secret: info.vehicle_secret })).bank_name, '페어은행');
 
-  // plan 3.4 example 3: 16 trips, 804km, 97,630원; 수진 14회 29,090 / 민호 10회 16,000 / 지은 5회 7,610 / 지훈 44,930
+  // 16 trips, 804km, 97,630원; 수진 14회 29,090 / 민호 10회 16,000 / 지은 5회 7,610 / 지훈 44,930
   const folder = await callRpc(db, 'get_folder_admin', { p_folder_code: info.folder_code, p_secret: info.vehicle_secret });
   assert.equal(folder.requested, null, '요청 전');
   assert.equal(folder.open.trips.length, 16);
@@ -96,7 +96,7 @@ test('the demo data matches the plan: the 출근 카풀 folder of example 3 and 
   assert.equal(Number(sujin.folder.my_total), 29090);
   assert.equal(sujin.folder.rides.filter((r) => Number(r.amount) === 2430).length, 6, 'the six mornings alone: 14,580원');
 
-  // the MT 귀갓길 riders as in the video script
+  // the MT 귀갓길 riders as in the demo video
   const mt = await callRpc(db, 'get_trip_admin', { p_code: info.trips.mt_return.code, p_admin_secret: info.vehicle_secret });
   assert.equal(mt.origin.label, '가평 MT 숙소');
   const at = Object.fromEntries(mt.passengers.map((p) => [p.name, [p.pickup?.label ?? null, p.dropoff.label]]));

@@ -5,8 +5,8 @@ import { demoCarSecret, store } from '../store';
 import { BatchPill, Button, Card, CarStandIn, ErrorText, Field, Page, StatusPill, TextInput, won } from '../ui';
 
 // Trips are made and changed on the car screen only (parked). The driver's phone links the car and
-// passes on what the car sends ("내 휴대폰으로 보내기", M1-2); in demo mode the old driver pages stand in
-// for the car screen.
+// passes on what the car sends ("내 휴대폰으로 보내기", M1-2); in demo mode CarScreenStandIn plays the
+// car screen.
 export default function Home() {
   return demoMode ? <CarScreenStandIn /> : <PhoneHome />;
 }

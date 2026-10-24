@@ -253,7 +253,7 @@ private fun App(config: Config, rpc: Rpc) {
             }
         }
     }
-    // keep the screen in step if the engine moved on (e.g. after a restart)
+    // keep the screen in step with the engine phase
     LaunchedEffect(trip.phase) {
         val want = when (trip.phase) {
             Phase.INVITE -> Screen.INVITE
@@ -488,7 +488,7 @@ private fun HomeScreen(
     var consent by remember { mutableStateOf(true) }
     val bookmarks by TripEngine.naviBookmarks.collectAsState()
     val recents by TripEngine.naviRecents.collectAsState()
-    // the navi's own list; only when it has nothing does the demo home stand in
+    // the navi's own list, or the demo home when the navi has none
     val naviPlaces = (bookmarks + recents).distinctBy { "%.4f,%.4f".format(java.util.Locale.US, it.place.lat, it.place.lng) }
     val choices = naviPlaces.ifEmpty { listOf(kr.fairpool.car.trip.NaviPlace(DemoPlaces.home, "시연용")) }
     LaunchedEffect(Unit) { TripEngine.navi?.requestPlaces() }
@@ -1047,7 +1047,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
             val riders = a.shares.count { !it.rider.isDriver }
             Voice.say("오늘 총비용 ${NumberFormat.getInstance().format(a.total)}원, 동승자 ${riders}명에게 보낼 준비가 됐어요")
         }
-        // nothing goes to the passengers yet: the driver checks (and fixes the toll), then 확정 posts it once
+        // the passengers see it only after the driver checks the toll and presses 확정
         runCatching { folders = rpc.call("get_trip_admin", args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret)).optJSONArray("folders") ?: JSONArray() }
     }
     val a = trip.allocation

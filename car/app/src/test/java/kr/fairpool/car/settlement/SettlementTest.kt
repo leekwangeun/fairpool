@@ -6,7 +6,7 @@ import org.junit.Test
 
 class SettlementTest {
 
-    // 기획서 3.4 계산 예시 1: 0 지훈(운전자), 1 민지, 2 서연, 3 태호. Raw OSRM distances in km.
+    // 동아리 MT 귀갓길: 0 지훈(운전자), 1 민지, 2 서연, 3 태호. Raw OSRM distances in km.
     private fun example1Raw(): DoubleArray {
         val d = DoubleArray(16)
         fun m(vararg p: Int) = p.fold(0) { acc, i -> acc or (1 shl i) }

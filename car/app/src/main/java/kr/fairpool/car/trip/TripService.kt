@@ -40,10 +40,10 @@ import android.os.Looper
 import kr.fairpool.car.data.Place
 import java.util.concurrent.ConcurrentHashMap
 
-/** Thin wrapper so the engine can ask the stock navi for a route without knowing NaviHelper types. */
 /** A place from the stock navi: its bookmarks (집, 회사, 즐겨찾기) and recent destinations. */
 data class NaviPlace(val place: Place, val kind: String)
 
+/** Thin wrapper so the engine can ask the stock navi for a route without knowing NaviHelper types. */
 class NaviBridge(context: Context) {
     private val navi = NaviHelper(context)
     private val bookmarks = TripEngine.naviBookmarks

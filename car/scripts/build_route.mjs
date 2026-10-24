@@ -1,5 +1,5 @@
-// 시나리오 A의 실제 도로 경로를 공개 OSRM에서 받아 시연용 주행 데이터(route_mt_return.json, .gpx)를 만든다.
-// 각 점에 누적 거리(km)를 붙이고, 정차 지점이 기획서의 누적 주행거리(69.6, 72.4, 74.3, 75.3, 80.0km)에
+// "동아리 MT 귀갓길"의 실제 도로 경로를 공개 OSRM에서 받아 시연용 주행 데이터(route_mt_return.json, .gpx)를 만든다.
+// 각 점에 누적 거리(km)를 붙이고, 정차 지점이 시연 시나리오의 누적 주행거리(69.6, 72.4, 74.3, 75.3, 80.0km)에
 // 정확히 오도록 구간마다 비율을 맞춘다. 사용: node car/scripts/build_route.mjs
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

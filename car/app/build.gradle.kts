@@ -4,9 +4,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// The repository lives under a non-ASCII folder and aapt2 cannot open such paths on Windows,
-// so build outputs go to an ASCII folder and the app keeps no res/ directory of its own.
-layout.buildDirectory.set(file("C:/dev/build/fairpool-car/app"))
+// aapt2 cannot open non-ASCII paths on Windows, so there the build outputs go to an ASCII folder
+// and the app keeps no res/ directory of its own.
+if (System.getProperty("os.name").startsWith("Windows")) {
+    layout.buildDirectory.set(file("C:/dev/build/fairpool-car/app"))
+}
 
 android {
     namespace = "kr.fairpool.car"
