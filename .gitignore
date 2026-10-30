@@ -1,9 +1,3 @@
-node_modules/
-dist/
-.env
-.env.local
-.vercel/
-supabase/.temp/
 *.log
-*.tsbuildinfo
-devserver/data/
+.DS_Store
+car/local.properties

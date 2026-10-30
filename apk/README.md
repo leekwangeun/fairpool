@@ -4,12 +4,12 @@
 
 | 파일 | 내용 |
 |---|---|
-| `팀명_페어풀_release.apk` | 페어풀(FairPool) 차량 앱 release 빌드 (`팀명` 자리는 참가 팀 이름) |
+| `CarEscape_차량탈출_release.apk` | 차량탈출 : AI 멀티버스 차량 앱 release 빌드 (시연용 디버그 키 서명) |
 
 설치:
 
 ```bash
-adb install apk/팀명_페어풀_release.apk
+adb install -r apk/CarEscape_차량탈출_release.apk
 ```
 
-차 앱이 붙을 서버와 테스트 환경은 저장소 맨 위 [README.md](../README.md)의 "실행 방법", "테스트 환경과 필요한 설정"을 참고하세요.
+실행 방법과 시연 순서는 저장소 맨 위 [README.md](../README.md)를 참고하세요.
