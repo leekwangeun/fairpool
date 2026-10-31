@@ -1,7 +1,9 @@
 package kr.carescape.multiverse.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,7 +12,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,8 +19,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -47,6 +46,7 @@ import kr.carescape.multiverse.game.GameEngine
 import kr.carescape.multiverse.game.GameState
 import kr.carescape.multiverse.game.PauseReason
 import kr.carescape.multiverse.game.Phase
+import kr.carescape.multiverse.game.Theme
 import kr.carescape.multiverse.vehicle.Seat
 import kr.carescape.multiverse.vehicle.Signals
 import kr.carescape.multiverse.vehicle.Turn
@@ -59,6 +59,7 @@ fun PlayScreen(s: GameState, signals: Signals, showTools: Boolean) {
     val theme = episode.theme
     val stage = s.stage ?: return
     val accent = theme.accent.asColor()
+    val soft = theme.soft.asColor()
     val effects by VehicleBus.effects.collectAsState()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
@@ -66,62 +67,79 @@ fun PlayScreen(s: GameState, signals: Signals, showTools: Boolean) {
 
     Box(Modifier.fillMaxSize().background(C.bg)) {
         Column(Modifier.fillMaxSize()) {
-            TopBar(
-                left = {
-                    Text(theme.title, style = T.big.copy(color = accent))
-                    Spacer(Modifier.width(24.dp))
-                    Text("단계 ${s.stageIndex + 1} / ${s.stageCount}", style = T.body)
-                },
-                middle = {
-                    Box(Modifier.width(300.dp).height(16.dp).clip(RoundedCornerShape(8.dp)).background(C.cardSoft)) {
-                        Box(Modifier.fillMaxWidth((s.stageIndex + s.progress.ratio) / s.stageCount).height(16.dp).clip(RoundedCornerShape(8.dp)).background(accent))
+            Column(Modifier.weight(1f).padding(start = 32.dp, end = 32.dp, top = 32.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                Header(
+                    left = {
+                        Tile(accent, "${theme.number}")
+                        Column {
+                            Text(theme.title, style = T.title.copy(fontSize = 30.sp))
+                            Text("${s.stageIndex + 1} / ${s.stageCount} 단계  ${stage.title}", style = T.chip.copy(color = accent, fontWeight = FontWeight.Bold, fontSize = 20.sp))
+                        }
+                        Stars(s.stageIndex, s.stageCount)
+                    },
+                    right = {
+                        if (theme == Theme.CODE_RED && signals.evSoc != null) Chip("에너지 ${signals.evSoc}%", filled = accent)
+                        Chip("%02d:%02d".format(elapsed / 60, elapsed % 60), bg = C.surface)
+                        StatusPill("주차 중, 잠금")
+                        MainButton("비상 전체 해제", color = C.danger, height = 64.dp, fontSize = 24) { GameEngine.emergencyAbort() }
                     }
-                    Text("경과 %02d:%02d".format(elapsed / 60, elapsed % 60), style = T.body)
-                    if (theme == kr.carescape.multiverse.game.Theme.CODE_RED && signals.evSoc != null) Chip("에너지 ${signals.evSoc}%", filled = accent)
-                },
-                right = { MainButton("비상 전체 해제", color = C.danger) { GameEngine.emergencyAbort() } }
-            )
-            Row(Modifier.weight(1f).padding(24.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                // left: the NPC and the clues so far
-                Card(Modifier.width(460.dp).fillMaxHeight()) {
-                    Box(Modifier.size(120.dp).clip(CircleShape).background(accent.copy(alpha = 0.25f)), contentAlignment = Alignment.Center) {
-                        Text(theme.npcName.take(1), style = T.title.copy(color = accent))
+                )
+                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    // left: the NPC and the digits collected so far
+                    Card(Modifier.width(430.dp).fillMaxHeight(), color = soft, pad = 28.dp) {
+                        Mascot(accent, 128.dp)
+                        Text("${theme.npcRole} ${theme.npcName}", style = T.title.copy(fontSize = 28.sp))
+                        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(C.card).padding(22.dp)) {
+                            Text(stage.line, style = T.body)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Text("모은 숫자", style = T.chip.copy(color = C.sub, fontWeight = FontWeight.Bold))
+                        val total = episode.stages.count { it.digit >= 0 }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (i in 0 until total) {
+                                val d = s.revealed.getOrNull(i)
+                                Box(
+                                    Modifier.size(width = 64.dp, height = 76.dp).clip(RoundedCornerShape(18.dp)).background(if (d != null) accent else C.card)
+                                        .then(if (d == null) Modifier.border(3.dp, C.line, RoundedCornerShape(18.dp)) else Modifier),
+                                    contentAlignment = Alignment.Center
+                                ) { Text(d?.toString() ?: "?", style = T.title.copy(fontSize = 40.sp, color = if (d != null) Color.White else C.line)) }
+                            }
+                        }
                     }
-                    Text("${theme.npcRole} ${theme.npcName}", style = T.big)
-                    Text(stage.title, style = T.body.copy(color = accent))
-                    Text("\"${stage.line}\"", style = T.body, modifier = Modifier.weight(1f))
-                    Text("모은 단서", style = T.sub)
-                    val total = episode.stages.count { it.digit >= 0 }
-                    Text((0 until total).joinToString(" ") { s.revealed.getOrNull(it)?.toString() ?: "_" }, style = T.title.copy(fontSize = 52.sp, letterSpacing = 4.sp))
+                    // middle: the gimmick
+                    GimmickArt(s, stage, signals, accent, soft,
+                        revealAnswer = showTools || "smartglass" !in signals.supported || "demo" in signals.supported,
+                        modifier = Modifier.weight(1f).fillMaxHeight())
+                    // right: the crew
+                    Column(Modifier.width(420.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        RoleCard("1열 기관장 (보호자)", C.primary, C.cardSoft, stage.parentTask, Modifier.fillMaxWidth())
+                        RoleCard("2열 탐정 (아이, ${s.childSeat.label})", C.success, C.successSoft, stage.childTask, Modifier.fillMaxWidth())
+                        if (s.showHint) {
+                            Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.warnSoft).padding(horizontal = 22.dp, vertical = 16.dp)) {
+                                Text("힌트: ${stage.hint}", style = T.body.copy(color = C.warn, fontSize = 22.sp))
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        MainButton(if (s.listening) "듣는 중..." else "말하기", Modifier.fillMaxWidth(), color = accent, height = 112.dp, fontSize = 36) { GameEngine.talk() }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            GhostButton(if (s.showHint) "힌트 닫기" else "힌트 보기", Modifier.weight(1f)) { GameEngine.hint() }
+                            GhostButton("대화", Modifier.weight(1f)) { GameEngine.openChat(true) }
+                        }
+                    }
                 }
-                // middle: the gimmick
-                GimmickArt(s, stage, signals, accent, revealAnswer = showTools || "smartglass" !in signals.supported || "demo" in signals.supported,
-                    modifier = Modifier.weight(1f).fillMaxHeight())
-                // right: the crew
-                Card(Modifier.width(400.dp).fillMaxHeight()) {
-                    Text("1열 기관장 (보호자)", style = T.sub.copy(color = accent))
-                    Text(stage.parentTask, style = T.body)
-                    Spacer(Modifier.height(8.dp))
-                    Text("2열 탐정 (아이, ${s.childSeat.label})", style = T.sub.copy(color = accent))
-                    Text(stage.childTask, style = T.body, modifier = Modifier.weight(1f))
-                    if (s.showHint) Text("힌트: ${stage.hint}", style = T.body.copy(color = C.warn))
-                    MainButton(if (s.listening) "듣는 중..." else "말하기", Modifier.fillMaxWidth(), color = accent) { GameEngine.talk() }
-                    GhostButton("힌트", Modifier.fillMaxWidth()) { GameEngine.hint() }
-                    GhostButton("대화 보기", Modifier.fillMaxWidth()) { GameEngine.openChat(true) }
+                // 4D effects strip
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("4D 연출", style = T.chip.copy(color = C.sub, fontWeight = FontWeight.Bold, fontSize = 20.sp))
+                    if (effects.isEmpty()) Text("없음", style = T.chip.copy(color = C.sub))
+                    for ((k, v) in effects) Chip("$k $v", bg = C.surface)
                 }
-            }
-            // 4D effects strip
-            Row(
-                Modifier.fillMaxWidth().background(C.surface).padding(horizontal = 48.dp, vertical = 14.dp).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("4D 연출", style = T.chip.copy(color = C.sub))
-                if (effects.isEmpty()) Text("없음", style = T.chip.copy(color = C.sub))
-                for ((k, v) in effects) Chip("$k $v")
             }
             if (showTools) DemoTools(s.childSeat)
         }
-        if (s.chatOpen) NpcPanel(s, accent)
+        if (s.chatOpen) NpcPanel(s, accent, soft)
         if (s.phase == Phase.PAUSED) PauseOverlay(s)
     }
 }
@@ -129,60 +147,73 @@ fun PlayScreen(s: GameState, signals: Signals, showTools: Boolean) {
 @Composable
 private fun PauseOverlay(s: GameState) {
     val reason = s.pauseReason ?: return
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.8f)).clickable(enabled = false) {}, contentAlignment = Alignment.Center) {
-        Card(Modifier.width(900.dp), border = if (reason == PauseReason.DRIVING) C.danger else C.warn) {
-            Text("잠깐 멈췄어요", style = T.title)
-            Text(reason.title, style = T.big.copy(color = if (reason == PauseReason.DRIVING) C.danger else C.warn))
-            Text(s.pauseDetail, style = T.body)
-            if (reason != PauseReason.DRIVING) Text("해결되면 자동으로 이어집니다.", style = T.sub)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                if (reason == PauseReason.DRIVING) MainButton("홈으로") { GameEngine.home() }
-                else GhostButton("게임 종료") { GameEngine.emergencyAbort() }
+    val driving = reason == PauseReason.DRIVING
+    val tone = if (driving) C.danger else C.warn
+    Box(Modifier.fillMaxSize().background(Color(0xB8191F28)).clickable(enabled = false) {}, contentAlignment = Alignment.Center) {
+        Card(Modifier.width(980.dp), border = tone, radius = 40.dp, pad = 48.dp, spacing = 20.dp) {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                Mascot(tone, 160.dp)
+                Text("잠깐 멈췄어요!", style = T.hero.copy(fontSize = 64.sp))
+                Box(Modifier.clip(RoundedCornerShape(50)).background(if (driving) C.dangerSoft else C.warnSoft).padding(horizontal = 32.dp, vertical = 16.dp)) {
+                    Text(reason.title, style = T.title.copy(color = tone, fontSize = 34.sp))
+                }
+                Text(s.pauseDetail, style = T.big)
+                if (!driving) Text("차가 움직이면 게임을 끝내고 차량 설정을 원래대로 돌려놓아요.", style = T.sub.copy(fontSize = 24.sp))
+                if (driving) MainButton("홈으로", color = C.primary) { GameEngine.home() }
+                else GhostButton("게임 끝내기", height = 104.dp) { GameEngine.emergencyAbort() }
             }
         }
     }
 }
 
 @Composable
-private fun NpcPanel(s: GameState, accent: Color) {
+private fun NpcPanel(s: GameState, accent: Color, soft: Color) {
     val theme = s.theme ?: return
     var text by remember { mutableStateOf("") }
     val list = rememberLazyListState()
     LaunchedEffect(s.chat.size) { if (s.chat.isNotEmpty()) list.animateScrollToItem(s.chat.size - 1) }
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)).clickable { GameEngine.openChat(false) }) {
+    Box(Modifier.fillMaxSize().background(Color(0x66191F28)).clickable { GameEngine.openChat(false) }) {
         Column(
-            Modifier.align(Alignment.CenterEnd).width(640.dp).fillMaxHeight().background(C.surface).clickable(enabled = false) {}.padding(28.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            Modifier.align(Alignment.CenterEnd).width(700.dp).fillMaxHeight()
+                .clip(RoundedCornerShape(topStart = 40.dp, bottomStart = 40.dp)).background(C.surface).clickable(enabled = false) {}.padding(36.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                Mascot(accent, 88.dp)
                 Column(Modifier.weight(1f)) {
-                    Text(theme.npcName, style = T.big.copy(color = accent))
-                    Text(theme.npcRole, style = T.sub)
+                    Text("${theme.npcRole} ${theme.npcName}", style = T.title)
+                    Text(theme.title, style = T.sub)
                 }
-                Chip("닫기") { GameEngine.openChat(false) }
+                GhostButton("닫기", height = 64.dp) { GameEngine.openChat(false) }
             }
-            LazyColumn(Modifier.weight(1f), state = list, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (s.chat.isEmpty()) item { Text("말하기 버튼을 누르고 ${theme.npcName}에게 물어보세요. 예: \"힌트 줘\", \"넌 누구야?\"", style = T.sub) }
+            LazyColumn(Modifier.weight(1f), state = list, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (s.chat.isEmpty()) item { Text("말하기를 누르고 ${theme.npcName}에게 물어봐요. \"힌트 줘!\", \"넌 누구야?\"", style = T.sub.copy(fontSize = 24.sp)) }
                 items(s.chat) { line ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (line.fromPlayer) Arrangement.End else Arrangement.Start) {
-                        Box(
-                            Modifier.clip(RoundedCornerShape(20.dp)).background(if (line.fromPlayer) C.primary else C.card).padding(18.dp)
-                        ) { Text(line.text, style = T.body) }
+                        val shape = if (line.fromPlayer) RoundedCornerShape(28.dp, 28.dp, 8.dp, 28.dp) else RoundedCornerShape(28.dp, 28.dp, 28.dp, 8.dp)
+                        Box(Modifier.width(520.dp).clip(shape).background(if (line.fromPlayer) C.primary else soft).padding(horizontal = 24.dp, vertical = 18.dp)) {
+                            Text(line.text, style = T.body.copy(fontSize = 27.sp, color = if (line.fromPlayer) Color.White else C.text))
+                        }
                     }
                 }
             }
-            if (s.listening) Text("듣는 중... 말해 주세요", style = T.body.copy(color = accent, fontWeight = FontWeight.Bold))
+            if (s.listening) {
+                Box(Modifier.clip(RoundedCornerShape(50)).background(soft).padding(horizontal = 24.dp, vertical = 14.dp)) {
+                    Text("듣고 있어요... 말해 보세요", style = T.big.copy(color = accent))
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = text, onValueChange = { text = it }, modifier = Modifier.weight(1f), singleLine = true,
-                    textStyle = T.body, placeholder = { Text("자판으로 묻기", style = T.sub) },
+                    textStyle = T.body, placeholder = { Text("자판으로 묻기 (보호자)", style = T.sub) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { GameEngine.ask(text); text = "" }),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent, unfocusedBorderColor = C.line, cursorColor = accent)
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent, unfocusedBorderColor = C.line, cursorColor = accent,
+                        focusedTextColor = C.text, unfocusedTextColor = C.text)
                 )
-                Chip("보내기", filled = accent) { GameEngine.ask(text); text = "" }
-                Chip(if (s.listening) "그만" else "말하기") { GameEngine.talk() }
+                Chip("보내기", filled = accent, big = true) { GameEngine.ask(text); text = "" }
             }
+            MainButton(if (s.listening) "그만 듣기" else "말하기", Modifier.fillMaxWidth(), color = accent, height = 120.dp, fontSize = 40) { GameEngine.talk() }
         }
     }
 }
@@ -196,19 +227,15 @@ fun DemoTools(child: Seat) {
     val sig by VehicleBus.signals.collectAsState()
     fun set(change: (Signals) -> Signals) = VehicleBus.update(change)
     Row(
-        Modifier.fillMaxWidth().background(Color(0xFF0F1426)).padding(horizontal = 24.dp, vertical = 10.dp).horizontalScroll(rememberScrollState()),
+        Modifier.fillMaxWidth().background(C.text).padding(horizontal = 24.dp, vertical = 10.dp).horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("시연 도구", style = T.chip.copy(color = C.warn))
+        Text("시연 도구", style = T.chip.copy(color = C.warn, fontWeight = FontWeight.Bold))
         Chip("성애 제거 ${if (sig.defroster) "끄기" else "켜기"}") { set { it.copy(defroster = !it.defroster) } }
         Chip("내기 순환") { set { it.copy(recirculation = !it.recirculation) } }
         Chip("공기청정") { set { it.copy(airCleaner = !it.airCleaner) } }
         Chip("독서등 ${child.label}") { set { it.copy(readingLight = it.readingLight + (child to !(it.readingLight[child] ?: false))) } }
-        Chip("핸들 -90") { set { it.copy(steeringAngle = -90f) } }
-        Chip("핸들 -45") { set { it.copy(steeringAngle = -45f) } }
-        Chip("핸들 0") { set { it.copy(steeringAngle = 0f) } }
-        Chip("핸들 +45") { set { it.copy(steeringAngle = 45f) } }
-        Chip("핸들 +90") { set { it.copy(steeringAngle = 90f) } }
+        for (a in listOf(-90, -45, 0, 45, 90)) Chip("핸들 ${if (a > 0) "+" else ""}$a") { set { it.copy(steeringAngle = a.toFloat()) } }
         Chip("브레이크 ${if (sig.brake) "떼기" else "밟기"}") { set { it.copy(brake = !it.brake) } }
         Chip("왼쪽 깜빡이") { set { it.copy(turn = if (it.turn == Turn.LEFT) Turn.OFF else Turn.LEFT) } }
         Chip("오른쪽 깜빡이") { set { it.copy(turn = if (it.turn == Turn.RIGHT) Turn.OFF else Turn.RIGHT) } }

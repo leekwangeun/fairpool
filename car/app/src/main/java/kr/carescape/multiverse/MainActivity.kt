@@ -5,7 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val widthPx = resources.displayMetrics.widthPixels.toFloat()
             CompositionLocalProvider(LocalDensity provides Density(widthPx / DESIGN_WIDTH, 1f)) {
-                MaterialTheme(colorScheme = darkColorScheme(primary = C.primary, background = C.bg, surface = C.surface)) {
+                MaterialTheme(colorScheme = lightColorScheme(primary = C.primary, background = C.bg, surface = C.surface)) {
                     val s by GameEngine.state.collectAsState()
                     val signals by VehicleBus.signals.collectAsState()
                     var settings by remember { mutableStateOf(false) }

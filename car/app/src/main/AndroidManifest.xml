@@ -45,7 +45,7 @@
         android:allowBackup="false"
         android:label="차량탈출 : AI 멀티버스"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
             android:name=".MainActivity"

@@ -12,30 +12,30 @@ enum class Theme(
     val npcName: String,
     val npcRole: String,
     val accent: Long,
-    val gradientTop: Long,
-    val gradientBottom: Long,
+    /** Light tint of [accent] for the NPC card and speech bubbles. */
+    val soft: Long,
     /** Ambient colour while playing (sent to the car). */
     val ambient: Int,
     val kinds: List<GimmickKind>
 ) {
     SUBMARINE(
         1, "보물 잠수함", "키즈 어드벤처", "권장 5~10세 가족", "노틸", "잠수함 AI",
-        0xFF27C7D9, 0xFF0E4A6B, 0xFF062B45, 0xFF1E7BFF.toInt(),
+        0xFF1EA7E1, 0xFFE3F5FC, 0xFF1E7BFF.toInt(),
         listOf(GimmickKind.FLASHLIGHT, GimmickKind.DEFROST, GimmickKind.LIGHT_SHARD, GimmickKind.SAFE_DIAL, GimmickKind.PURIFY)
     ),
     CODE_RED(
-        2, "코드 레드", "키즈, 주니어 SF", "EV 충전 대기 추천", "코어", "우주선 AI",
-        0xFFFF5A3C, 0xFF4A1C12, 0xFF2A0C08, 0xFFFF3B1F.toInt(),
+        2, "코드 레드", "키즈 우주 모험", "충전 기다릴 때", "코어", "우주선 AI",
+        0xFFFF6B3D, 0xFFFFEDE6, 0xFFFF3B1F.toInt(),
         listOf(GimmickKind.PURIFY, GimmickKind.DEFROST, GimmickKind.TEMPERATURE, GimmickKind.SAFE_DIAL, GimmickKind.FLASHLIGHT)
     ),
     GHOST_TAXI(
-        3, "고스트 택시", "4D 미스터리 호러", "초등 고학년, 커플, 친구", "자정의 승객", "유령 승객",
-        0xFF1FD1B0, 0xFF1B0A1E, 0xFF080308, 0xFF0FB89A.toInt(),
+        3, "고스트 택시", "오싹 미스터리", "초등 고학년 이상", "자정의 승객", "유령 승객",
+        0xFF7B61FF, 0xFFEEEAFF, 0xFF7B61FF.toInt(),
         listOf(GimmickKind.FLASHLIGHT, GimmickKind.DEFROST, GimmickKind.TEMPERATURE, GimmickKind.SAFE_DIAL, GimmickKind.LIGHT_SHARD)
     ),
     DETECTIVE(
-        4, "밀실의 탐정", "추리 크라임씬", "온 가족, 성인 커플", "용의자 셋", "AI 용의자",
-        0xFFE6B452, 0xFF3B2E12, 0xFF1C1608, 0xFFFFB347.toInt(),
+        4, "밀실의 탐정", "추리 놀이", "온 가족", "용의자 셋", "AI 용의자",
+        0xFFF5A623, 0xFFFFF4DF, 0xFFFFB347.toInt(),
         listOf(GimmickKind.LIGHT_SHARD, GimmickKind.TEMPERATURE, GimmickKind.SAFE_DIAL, GimmickKind.DEFROST, GimmickKind.FLASHLIGHT)
     );
 
