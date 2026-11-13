@@ -24,6 +24,8 @@
 
 핵심 화면 24개는 [docs/screens](docs/screens/README.md)에 있습니다(시안 전체는 차 가로 37개, 세로 37개, 휴대폰 15개).
 
+기획 배경, 기능, 정산 방법, 개발 계획은 [docs/기획서.md](docs/기획서.md)에 있습니다.
+
 ## 저장소 구성
 
 | 폴더 | 내용 |
@@ -34,7 +36,7 @@
 | `supabase/migrations/` | 운행 서버의 DB 테이블과 서버 함수(SQL) |
 | `supabase/tests/` | 실제 마이그레이션을 PGlite(Node에서 도는 Postgres)로 돌리는 테스트 58개 |
 | `devserver/` | Supabase 없이 쓰는 로컬 개발 서버. 같은 마이그레이션을 Supabase와 같은 주소 모양(`POST /rest/v1/rpc/<함수>`)으로 열고 시연 데이터를 넣음 |
-| `docs/` | 서버 설계, 차량 앱 연동 방법(화면별로 부르는 함수), 화면 시안(`docs/screens/`) |
+| `docs/` | 기획서(`docs/기획서.md`), 서버 설계, 차량 앱 연동 방법(화면별로 부르는 함수), 화면 시안(`docs/screens/`) |
 
 ## 실행 방법
 
