@@ -10,27 +10,41 @@
 - **바로 정산하거나 카풀 폴더에 쌓아 한 번에 정산합니다.** 동승자 페이지에는 정산 중에만 계좌번호가 보이고, 페어풀은 송금하지 않습니다.
 - **계정이 없습니다.** 운전자, 동승자, 차는 각자 기기에 둔 무작위 비밀값으로 구분하고 서버에는 해시만 저장합니다.
 
+## 화면
+
+| 차 화면: 도착 정산 | 차 화면: 정차 중 하차 확인 |
+|---|---|
+| ![도착 정산](docs/screens/car_L6_settlement.png) | ![하차 확인 카드](docs/screens/car_L5_dropoff_card.png) |
+| **차 화면: 운행 만들기** | **차 화면: 카풀 폴더 합쳐서 정산** |
+| ![운행 만들기](docs/screens/car_L1_create_trip.png) | ![카풀 폴더](docs/screens/car_L1-6_folder_before_request.png) |
+
+| 동승자 휴대폰: 참여 | 동승자 휴대폰: 픽업 대기 | 동승자 휴대폰: 정산 |
+|---|---|---|
+| ![참여](docs/screens/phone_M1_join.png) | ![픽업 대기](docs/screens/phone_M2_before_pickup.png) | ![정산](docs/screens/phone_M3_settlement.png) |
+
+핵심 화면 24개는 [docs/screens](docs/screens/README.md)에 있습니다(시안 전체는 차 가로 37개, 세로 37개, 휴대폰 15개).
+
 ## 저장소 구성
 
 | 폴더 | 내용 |
 |---|---|
-| `apk/` | 제출용 release APK (`팀명_페어풀_release.apk`) |
+| `apk/` | 제출용 release APK (`FairPool_페어풀_release.apk`) |
 | `car/` | 차량 앱 (Kotlin, Pleos Connect) |
 | `web/` | 휴대폰 웹: 동승자 페이지, 운전자 휴대폰의 차 연결과 보내기 (React, TypeScript, Vite, Tailwind CSS, MapLibre) |
 | `supabase/migrations/` | 운행 서버의 DB 테이블과 서버 함수(SQL) |
 | `supabase/tests/` | 실제 마이그레이션을 PGlite(Node에서 도는 Postgres)로 돌리는 테스트 47개 |
 | `devserver/` | Supabase 없이 쓰는 로컬 개발 서버. 같은 마이그레이션을 Supabase와 같은 주소 모양(`POST /rest/v1/rpc/<함수>`)으로 열고 시연 데이터를 넣음 |
-| `docs/` | 서버 설계, 차량 앱 연동 방법(화면별로 부르는 함수) |
+| `docs/` | 서버 설계, 차량 앱 연동 방법(화면별로 부르는 함수), 화면 시안(`docs/screens/`) |
 
 ## 실행 방법
 
 ### 1. 차량 앱 (APK)
 
 1. Pleos Connect 에뮬레이터(또는 차량)를 켭니다.
-2. `apk/팀명_페어풀_release.apk` 를 설치합니다.
+2. `apk/FairPool_페어풀_release.apk` 를 설치합니다.
 
 ```bash
-adb install apk/팀명_페어풀_release.apk
+adb install apk/FairPool_페어풀_release.apk
 ```
 
 3. 차 앱이 붙을 서버를 켭니다(아래 2). 에뮬레이터에서는 PC의 개발 서버가 `http://10.0.2.2:54321` 로 보입니다.
