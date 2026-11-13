@@ -38,7 +38,7 @@ test('rpc calls take named JSON arguments and return the function result', async
     assert.match(trip.body.code, /^[2-9A-HJ-NP-Z]{8}$/);
     const view = await call('get_trip', { p_code: trip.body.code });
     assert.equal(view.body.seats_left, 2);
-    assert.equal(view.body.origin, '집');
+    assert.equal(view.body.origin, null, 'the origin is named only to riders who get on there');
     assert.equal(car.headers.get('access-control-allow-origin'), '*');
   });
 });

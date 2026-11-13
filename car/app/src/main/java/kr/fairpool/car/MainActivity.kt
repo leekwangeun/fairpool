@@ -1,6 +1,9 @@
 package kr.fairpool.car
 
+import android.car.Car
+import android.car.drivingstate.CarUxRestrictionsManager
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -69,12 +72,15 @@ import kr.fairpool.car.data.RpcException
 import kr.fairpool.car.data.args
 import kr.fairpool.car.map.CourseMap
 import kr.fairpool.car.trip.Phase
+import kr.fairpool.car.trip.PostResult
 import kr.fairpool.car.trip.SeatSlot
 import kr.fairpool.car.trip.TripEngine
 import kr.fairpool.car.trip.TripService
 import kr.fairpool.car.trip.distanceKm
 import kr.fairpool.car.trip.Voice
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -94,9 +100,20 @@ private enum class Screen { SETUP, HOME, DRIVER, INVITE, SEATS, DRIVING, SETTLE,
 
 private fun won(v: Long) = NumberFormat.getInstance().format(v) + "원"
 
+/** AAOS driving restrictions (CarUxRestrictions): true while the car requires a distraction-optimized screen. */
+private val uxRestricted = MutableStateFlow(false)
+
+/** The Pleos emulator (or any AVD): the navi cannot follow its mock GPS, so the app asks the router for ETAs itself. */
+private fun isEmulator(): Boolean =
+    Build.FINGERPRINT.contains("generic") || Build.FINGERPRINT.contains("emulator") ||
+        Build.HARDWARE == "ranchu" || Build.HARDWARE == "goldfish" ||
+        Build.PRODUCT.contains("sdk") || Build.MODEL.contains("Emulator")
+
 class MainActivity : ComponentActivity() {
     private lateinit var config: Config
     private lateinit var rpc: Rpc
+    private var car: Car? = null
+    private var ux: CarUxRestrictionsManager? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -106,11 +123,12 @@ class MainActivity : ComponentActivity() {
         TripEngine.fuelPrice = config.fuelPrice
         TripEngine.defaultEfficiency = config.efficiency.toDouble()
         TripEngine.preferSavedTable = config.useSavedTable
-        TripService.start(this)
-        // speech answers on the L5 card and Pleos fused location (both dangerous permissions)
-        val wanted = arrayOf(android.Manifest.permission.RECORD_AUDIO, "pleos.car.permission.FUSED_LOCATION")
+        TripEngine.routerEta = isEmulator()
+        // speech answers on the L5 card, Pleos fused location and vehicle speed (all runtime permissions)
+        val wanted = arrayOf(android.Manifest.permission.RECORD_AUDIO, "pleos.car.permission.FUSED_LOCATION", Car.PERMISSION_SPEED)
             .filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
         if (wanted.isNotEmpty()) requestPermissions(wanted.toTypedArray(), 1)
+        watchDrivingRestrictions()
         setContent {
             // the Pleos display reports mdpi for a 2560x1440 panel; scale up so text reads at driving distance
             val base = LocalDensity.current
@@ -120,6 +138,42 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        TripEngine.uiVisible.value = true
+        TripService.start(this)
+    }
+
+    override fun onStop() {
+        TripEngine.uiVisible.value = false
+        super.onStop()
+    }
+
+    @Deprecated("Deprecated in ComponentActivity")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // the service picks up the speed once CAR_SPEED is granted
+        TripService.start(this)
+    }
+
+    override fun onDestroy() {
+        runCatching { ux?.unregisterListener() }
+        runCatching { car?.disconnect() }
+        super.onDestroy()
+    }
+
+    /** While AAOS says the car is driving, only the driving screen (or a 정차 후 이용 view) is shown. */
+    private fun watchDrivingRestrictions() {
+        runCatching {
+            val c = Car.createCar(this)
+            car = c
+            val m = c.getCarManager(Car.CAR_UX_RESTRICTION_SERVICE) as CarUxRestrictionsManager
+            ux = m
+            uxRestricted.value = m.currentCarUxRestrictions?.isRequiresDistractionOptimization == true
+            m.registerListener { r -> uxRestricted.value = r.isRequiresDistractionOptimization }
+        }.onFailure { TripEngine.log("주행 제한 정보를 받지 못함: ${it.message}") }
     }
 }
 
@@ -231,9 +285,16 @@ private fun App(config: Config, rpc: Rpc) {
     var screen by remember { mutableStateOf(if (config.vehicleSecret == null) Screen.SETUP else Screen.HOME) }
     var message by remember { mutableStateOf<String?>(null) }
     val trip by TripEngine.state.collectAsState()
+    val restricted by uxRestricted.collectAsState()
+    // driving: AAOS asks for a distraction-optimized screen, or the car reports it is moving
+    val driving = restricted || (trip.speedKnown && !trip.stopped)
 
     Box(Modifier.fillMaxSize().background(Bg).padding(28.dp)) {
-        when (screen) {
+        if (driving && trip.phase == Phase.DRIVING) {
+            DrivingScreen(canAct = false, onArrive = {})
+        } else if (driving) {
+            ParkedOnlyScreen()
+        } else when (screen) {
             Screen.SETUP -> SetupScreen(config, rpc, onDone = { screen = Screen.HOME }, onDriver = { screen = Screen.DRIVER }, onSettings = { screen = Screen.SETTINGS })
             Screen.SETTINGS -> SettingsScreen(config, onBack = { screen = if (config.vehicleSecret == null) Screen.SETUP else Screen.HOME })
             Screen.DRIVER -> DriverScreen(config, rpc, onBack = { screen = Screen.HOME })
@@ -241,7 +302,7 @@ private fun App(config: Config, rpc: Rpc) {
                 onFolders = { screen = Screen.FOLDERS }, onSettings = { screen = Screen.SETTINGS }, onMessage = { message = it })
             Screen.INVITE -> InviteScreen(config, rpc, onNext = { TripEngine.toSeats(); screen = Screen.SEATS }, onMessage = { message = it })
             Screen.SEATS -> SeatsScreen(onDepart = { TripEngine.depart(); screen = Screen.DRIVING })
-            Screen.DRIVING -> DrivingScreen(onArrive = { TripEngine.arrive(); screen = Screen.SETTLE })
+            Screen.DRIVING -> DrivingScreen(canAct = trip.stopped, onArrive = { TripEngine.arrive(); screen = Screen.SETTLE })
             Screen.SETTLE -> SettleScreen(rpc, onDone = { TripEngine.reset(); screen = Screen.HOME }, onMessage = { message = it })
             Screen.FOLDERS -> FoldersScreen(config, rpc, onBack = { screen = Screen.HOME }, onMessage = { message = it })
         }
@@ -263,6 +324,23 @@ private fun App(config: Config, rpc: Rpc) {
             Phase.IDLE -> null
         }
         if (want != null && screen != want) screen = want
+    }
+}
+
+/** Every screen but the driving one, while the car moves: no typing, settings or folders until it stops. */
+@Composable
+private fun ParkedOnlyScreen() {
+    Column(Modifier.fillMaxSize()) {
+        Header("주행 중", Orange)
+        Card(Modifier.fillMaxWidth().weight(1f)) {
+            Spacer(Modifier.weight(1f))
+            Text("정차 후 이용할 수 있어요", fontSize = 36.sp, fontWeight = FontWeight.Bold, color = Ink,
+                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
+            Text("운전 중에는 화면을 조작하지 않아도 돼요. 차를 세우면 하던 화면으로 돌아가요.", fontSize = 20.sp, color = Sub,
+                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.weight(1f))
+        }
     }
 }
 
@@ -465,12 +543,12 @@ private fun DriverScreen(config: Config, rpc: Rpc, onBack: () -> Unit) {
 
 // ---- L1 new trip ----------------------------------------------------------------------------------------
 
-private data class RuleOption(val title: String, val sub: String, val rule: String, val includeDriver: Boolean)
+private data class RuleOption(val title: String, val sub: String, val rule: String)
 
 private val rules = listOf(
-    RuleOption("탄 거리 비례", "운전자 포함", "shapley", true),
-    RuleOption("탄 거리 비례", "운전자 제외", "shapley", false),
-    RuleOption("N분의 1", "운전자 제외", "equal", false)
+    RuleOption("공정 정산", "돌아간 만큼 더 내요", "shapley"),
+    RuleOption("탄 거리 비례", "각자 탄 km만큼 내요", "distance"),
+    RuleOption("N분의 1", "모두 똑같이 내요", "equal")
 )
 
 
@@ -483,6 +561,7 @@ private fun HomeScreen(
     var title by remember { mutableStateOf("MT 귀갓길") }
     var seats by remember { mutableIntStateOf(3) }
     var rule by remember { mutableIntStateOf(0) }
+    var includeDriver by remember { mutableStateOf(true) }
     var dest by remember { mutableStateOf<Place?>(null) }
     var picking by remember { mutableStateOf(false) }
     var consent by remember { mutableStateOf(true) }
@@ -534,8 +613,8 @@ private fun HomeScreen(
                 .onSuccess { c ->
                     Place.from(c.optJSONObject("destination"))?.let { dest = it; destAuto = false }
                     seats = c.optInt("seats", seats).coerceIn(1, SeatSlot.entries.size)
-                    rules.indexOfFirst { it.rule == c.optString("rule") && it.includeDriver == c.optBoolean("include_driver", true) }
-                        .takeIf { it >= 0 }?.let { rule = it }
+                    rules.indexOfFirst { it.rule == c.optString("rule") }.takeIf { it >= 0 }?.let { rule = it }
+                    includeDriver = c.optBoolean("include_driver", true)
                 }
                 .onFailure { onMessage("즐겨찾기를 불러오지 못했어요: ${it.message}") }
         }
@@ -544,7 +623,7 @@ private fun HomeScreen(
         DestinationPicker(bookmarks, recents, dest, onPick = { dest = it; destAuto = false; picking = false }, onClose = { picking = false })
     }
     Column(Modifier.fillMaxSize()) {
-        Header("주차 중${if (config.demo) " · 데모" else ""}", Green, onSettings)
+        Header("주차 중${if (config.demo) " (데모)" else ""}", Green, onSettings)
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(Modifier.weight(1.1f).fillMaxHeight().verticalScroll(rememberScrollState())) {
                 Title("새 운행을 만들어요", 32)
@@ -572,6 +651,11 @@ private fun HomeScreen(
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     rules.forEachIndexed { i, r -> Chip(r.title, rule == i, Modifier.weight(1f), r.sub) { rule = i } }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Chip("운전자 포함", includeDriver, Modifier.weight(1f), "운전자 몫도 나눠 계산해요") { includeDriver = true }
+                    Chip("운전자 제외", !includeDriver, Modifier.weight(1f), "동승자끼리만 나눠 내요") { includeDriver = false }
                 }
                 Spacer(Modifier.height(18.dp))
                 Card(Modifier.fillMaxWidth().clickable { picking = true }, 22) {
@@ -604,7 +688,7 @@ private fun HomeScreen(
                                 .clickable { resume(t.optString("code")) }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text(t.optString("title"), fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                                    Body("${t.optInt("passengers")}명 참여 · 이어서 진행", Blue, 15)
+                                    Body("${t.optInt("passengers")}명 참여, 이어서 진행", Blue, 15)
                                 }
                                 Text("›", fontSize = 30.sp, color = Blue)
                             }
@@ -642,9 +726,9 @@ private fun HomeScreen(
                 try {
                     val res = rpc.call("create_trip", args(
                         "p_title" to title, "p_origin" to origin.json(), "p_destination" to destination.json(),
-                        "p_include_driver" to r.includeDriver, "p_seats" to seats, "p_rule" to r.rule,
+                        "p_include_driver" to includeDriver, "p_seats" to seats, "p_rule" to r.rule,
                         "p_vehicle_secret" to secret))
-                    TripEngine.startInvite(res.optString("code"), res.optString("admin_secret"), title, origin, destination, seats, r.includeDriver, r.rule)
+                    TripEngine.startInvite(res.optString("code"), res.optString("admin_secret"), title, origin, destination, seats, includeDriver, r.rule)
                     onStart()
                 } catch (e: Exception) {
                     onMessage("운행을 만들지 못했어요: ${e.message}")
@@ -878,7 +962,9 @@ private fun RowScope.SeatCell(slot: SeatSlot) {
     val trip by TripEngine.state.collectAsState()
     val who = trip.passengers.firstOrNull { it.seat == slot && !it.alighted }
     val occupied = trip.seatOccupied[slot] == true
-    SeatBox(who?.name ?: slot.label, occupied, who != null) {
+    // no seat sensor and no belt there: that seat is confirmed by hand
+    val manual = slot !in trip.seatSensor
+    SeatBox((who?.name ?: slot.label) + if (manual) "\n수동 확인" else "", occupied, who != null) {
         // tap: the next person in the list takes this seat, swapping with whoever had it
         val order = trip.passengers.filter { !it.alighted }
         if (order.isNotEmpty()) {
@@ -903,14 +989,25 @@ private fun RowScope.SeatBox(label: String, occupied: Boolean, named: Boolean, o
 // ---- L4 driving + L5 stop card --------------------------------------------------------------------------
 
 @Composable
-private fun DrivingScreen(onArrive: () -> Unit) {
+private fun DrivingScreen(canAct: Boolean, onArrive: () -> Unit) {
     val trip by TripEngine.state.collectAsState()
-    val parked = trip.gear.contains("PARK", ignoreCase = true) || trip.gear == "P"
-    LaunchedEffect(trip.card) {
+    LaunchedEffect(trip.card, canAct) {
         val card = trip.card ?: return@LaunchedEffect
-        // read the card once, then listen for "맞아" / "잘못 인식" while it is up (the car is stopped)
+        if (card.confirm) {
+            // a question: nothing is recorded until the driver answers, and only while stopped
+            if (!canAct) return@LaunchedEffect
+            Voice.say("${card.name} 님 ${if (card.boarding) "탔나요" else "내렸나요"}? 맞으면 네, 아니면 아니요라고 말해 주세요") {
+                Voice.askConfirm { ok -> if (ok) TripEngine.confirmCard() else TripEngine.dismissCard() }
+            }
+            try {
+                awaitCancellation()
+            } finally {
+                Voice.stopListening()
+            }
+        }
+        // read the card once, then listen for "맞아" / "잘못 인식" while it is up and the car is stopped
         Voice.say("${card.name} 님 ${if (card.boarding) "탑승을" else "하차를"} 기록했어요") {
-            Voice.askConfirm { ok -> if (ok) TripEngine.dismissCard() else TripEngine.undoCard() }
+            if (canAct) Voice.askConfirm { ok -> if (ok) TripEngine.dismissCard() else TripEngine.undoCard() }
         }
         try {
             delay(9000)
@@ -920,7 +1017,7 @@ private fun DrivingScreen(onArrive: () -> Unit) {
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Header(if (parked) "정차 중" else "카풀 기록 중", if (parked) Orange else Green)
+        Header(if (canAct) "정차 중" else "카풀 기록 중", if (canAct) Orange else Green)
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(Modifier.weight(1.2f).fillMaxHeight()) {
                 val next = trip.nextStop
@@ -930,8 +1027,8 @@ private fun DrivingScreen(onArrive: () -> Unit) {
                     val ahead = trip.ahead.firstOrNull()
                     Body(
                         when {
-                            trip.atStop -> "도착했어요 · ${next?.place?.area ?: ""}"
-                            ahead != null -> "%.1fkm · 약 %d분 · %s".format(ahead.first, ahead.second, next?.place?.area ?: "")
+                            trip.atStop -> "도착했어요, ${next?.place?.area ?: ""}"
+                            ahead != null -> "%.1fkm, 약 %d분, %s".format(ahead.first, ahead.second, next?.place?.area ?: "")
                             else -> next?.place?.area ?: ""
                         },
                         if (trip.atStop) Green else Sub, 18
@@ -965,10 +1062,10 @@ private fun DrivingScreen(onArrive: () -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Stat("탑승", "${trip.aboard.size}명", Modifier.weight(1f))
                     Stat("주행", "%.1fkm".format(trip.drivenKm), Modifier.weight(1f))
-                    Stat("연비", trip.efficiencyKmL?.let { "%.1fkm/L".format(it) } ?: "-", Modifier.weight(1f))
+                    Stat("연비", (trip.tripKmL ?: trip.efficiencyKmL)?.let { "%.1fkm/L".format(it) } ?: "-", Modifier.weight(1f))
                 }
                 Card(Modifier.fillMaxWidth().weight(1f), 22) {
-                    Body("수동 기록 (센서가 놓쳤을 때)", Ink, 17)
+                    Body(if (canAct) "수동 기록 (센서가 놓쳤을 때)" else "탄 사람", Ink, 17)
                     Spacer(Modifier.height(6.dp))
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         for (p in trip.passengers) {
@@ -976,38 +1073,62 @@ private fun DrivingScreen(onArrive: () -> Unit) {
                                 Text(p.name, fontSize = 19.sp, color = Ink, modifier = Modifier.width(80.dp))
                                 Body(when { p.alighted -> "내림"; p.boarded -> "타고 있음"; else -> "탈 예정" }, size = 16)
                                 Spacer(Modifier.weight(1f))
-                                if (!p.boarded) MiniBtn("탑승") { TripEngine.board(p.id, p.seat, unchecked = false) }
-                                if (p.boarded && !p.alighted) MiniBtn("하차") { TripEngine.alight(p.id) }
+                                // recording by hand only while stopped
+                                if (canAct && !p.boarded) MiniBtn("탑승") { TripEngine.board(p.id, p.seat, unchecked = false) }
+                                if (canAct && p.boarded && !p.alighted) MiniBtn("하차") { TripEngine.alight(p.id) }
                             }
                         }
                     }
                 }
-                Body("기어 ${trip.gear} · 주행 중에는 화면을 조작하지 않아도 돼요", size = 15)
+                Body(
+                    if (canAct) "기어 ${trip.gear}, 정차 중이라 기록을 고칠 수 있어요"
+                    else "주행 중에는 화면을 조작하지 않아도 돼요. 탑승, 하차, 도착은 정차하면 보여요",
+                    size = 15
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Btn("내비에서 보기", Modifier.weight(1f), primary = false) { TripEngine.navi?.showInNavi() }
-                    Btn("도착, 정산하기", Modifier.weight(1f), onClick = onArrive)
+                    if (canAct) Btn("도착, 정산하기", Modifier.weight(1f), onClick = onArrive)
                 }
             }
         }
     }
     trip.card?.let { card ->
+        val tint = if (card.confirm) Orange else Green
         Box(Modifier.fillMaxSize().padding(top = 80.dp), contentAlignment = Alignment.TopEnd) {
             Row(
-                Modifier.width(620.dp).clip(RoundedCornerShape(24.dp)).background(CardBg)
-                    .border(3.dp, Green, RoundedCornerShape(24.dp)).padding(24.dp),
+                Modifier.width(680.dp).clip(RoundedCornerShape(24.dp)).background(CardBg)
+                    .border(3.dp, tint, RoundedCornerShape(24.dp)).padding(24.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(Modifier.size(56.dp).clip(CircleShape).background(Green), contentAlignment = Alignment.Center) {
-                    Text("✓", color = Color.White, fontSize = 26.sp)
+                Box(Modifier.size(56.dp).clip(CircleShape).background(tint), contentAlignment = Alignment.Center) {
+                    Text(if (card.confirm) "?" else "✓", color = Color.White, fontSize = 26.sp)
                 }
                 Spacer(Modifier.width(18.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("${card.name}님 ${if (card.boarding) "탑승을" else "하차를"} 기록했어요", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
-                    val at = trip.passengers.firstOrNull { it.id == card.passengerId }
-                        ?.let { if (card.boarding) it.boardPlace else it.alightPlace }?.label ?: ""
-                    Body(if (trip.drivenKm > 0.05) "$at · %.1fkm 지점".format(trip.drivenKm) else at, size = 16)
+                    if (card.confirm) {
+                        Text("${card.name}님이 ${if (card.boarding) "탔나요?" else "내렸나요?"}", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
+                        val seat = card.slot?.label ?: "자리"
+                        Body(
+                            if (card.boarding) "${seat}에 누가 앉았는데 탈 곳이 아니에요"
+                            else "${seat}이 비었는데 내릴 곳이 아니에요. 잠깐 내린 거면 '아니요'를 눌러요",
+                            size = 16
+                        )
+                        if (!canAct) Body("정차하면 확인할 수 있어요", Orange, 15)
+                    } else {
+                        Text("${card.name}님 ${if (card.boarding) "탑승을" else "하차를"} 기록했어요", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
+                        val at = trip.passengers.firstOrNull { it.id == card.passengerId }
+                            ?.let { if (card.boarding) it.boardPlace else it.alightPlace }?.label ?: ""
+                        Body(if (trip.drivenKm > 0.05) "$at, %.1fkm 지점".format(trip.drivenKm) else at, size = 16)
+                    }
                 }
-                MiniBtn("잘못 인식") { TripEngine.undoCard() }
+                if (canAct) {
+                    if (card.confirm) {
+                        MiniBtn(if (card.boarding) "탔어요" else "내렸어요") { TripEngine.confirmCard() }
+                        MiniBtn("아니요") { TripEngine.dismissCard() }
+                    } else {
+                        MiniBtn("잘못 인식") { TripEngine.undoCard() }
+                    }
+                }
             }
         }
     }
@@ -1041,6 +1162,8 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
     var tollEdit by remember { mutableStateOf<String?>(null) }
     var showGroups by remember { mutableStateOf(false) }
     var confirming by remember { mutableStateOf(false) }
+    var rerouting by remember { mutableStateOf(false) }
+    var postNote by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         val a = TripEngine.computeSettlement()
         if (a != null) {
@@ -1060,7 +1183,7 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                     "segments" -> "길찾기 없이 구간별로 나눔"
                     else -> "도착 후 길찾기로 받은 도로 거리"
                 }
-                Body("$from · 돌아가는 조합은 지나가는 경로로 맞춤", size = 15)
+                Body("$from, 돌아가는 조합은 지나가는 경로로 맞춤", size = 15)
                 Spacer(Modifier.height(12.dp))
                 Column(Modifier.height(520.dp).verticalScroll(rememberScrollState())) {
                     for ((names, km) in trip.coalitions.sortedBy { it.first.size }) {
@@ -1115,10 +1238,32 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                     Text(" 원", fontSize = 28.sp, color = Sub, modifier = Modifier.padding(bottom = 10.dp))
                 }
                 Body(when (a.method) {
-                    "shapley" -> "함께 타서 아낀 돈을 각자 만든 거리만큼 나눴어요"
-                    "equal" -> "동승자끼리 똑같이 나눴어요"
-                    else -> "길찾기가 안 돼 구간별로 탄 사람끼리 나눴어요"
-                }, size = 18)
+                    "shapley" -> "공정 정산: 함께 타서 아낀 돈을 각자 만든 거리만큼 나눴어요"
+                    "distance" -> "탄 거리 비례: 각자 탄 km만큼 나눴어요"
+                    "equal" -> if (trip.includeDriver) "N분의 1: 운전자까지 모두 똑같이 나눴어요" else "N분의 1: 동승자끼리 똑같이 나눴어요"
+                    else -> "공정 정산: 길찾기가 안 돼 구간별로 탄 사람끼리 나눴어요"
+                } + if (trip.includeDriver) "" else " (운전자 제외)", size = 18)
+                if (a.provisional) {
+                    Spacer(Modifier.height(10.dp))
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFFFFF4E5)).padding(14.dp)) {
+                        Text("임시 금액이에요", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Orange)
+                        Body(
+                            if (trip.distanceSource == "saved") "출발 때 받아 둔 거리표로 계산했어요. 도착 후 길찾기가 되면 금액이 바뀔 수 있어요"
+                            else "도착 후 길찾기를 못 해 혼자 갈 때 금액은 어림값이에요. 길찾기가 되면 다시 계산해 올려요",
+                            size = 15
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        MiniBtn(if (rerouting) "길찾는 중..." else "길찾기 다시 하기") {
+                            if (rerouting) return@MiniBtn
+                            rerouting = true
+                            scope.launch {
+                                val again = TripEngine.computeSettlement(forceRoute = true)
+                                rerouting = false
+                                onMessage(if (again?.provisional == false) "길찾기 결과로 다시 계산했어요" else "아직 길찾기가 안 돼요")
+                            }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Stat("기름값", won(a.fuelAmount), Modifier.weight(1f))
@@ -1127,10 +1272,18 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Stat("총 거리 (눌러서 조합별 거리)", "%.1fkm".format(trip.settlementKm), Modifier.weight(1f).clickable { showGroups = true })
-                    Stat("연비", "%.1fkm/L".format(trip.efficiencyKmL ?: TripEngine.defaultEfficiency), Modifier.weight(1f))
+                    val economyFrom = when (trip.efficiencySource) {
+                        "trip" -> "주행 중 측정"
+                        "car" -> "차가 알려 준 값"
+                        else -> "기본값, 설정에서 바꿔요"
+                    }
+                    Stat("연비 ($economyFrom)", "%.1fkm/L".format(trip.settlementEfficiency), Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
-                Body(if (trip.settlementPosted) "동승자 페이지에 정산을 올렸어요" else "확정하면 동승자 페이지에 올라가요", if (trip.settlementPosted) Green else Sub, 17)
+                Body(
+                    postNote ?: if (trip.settlementPosted) "동승자 페이지에 정산을 올렸어요" else "확정하면 동승자 페이지에 올라가요",
+                    if (postNote != null) Orange else if (trip.settlementPosted) Green else Sub, 17
+                )
                 Spacer(Modifier.height(12.dp))
                 // only the people who actually rode, in colour
                 val rode = trip.passengers.filter { it.boarded }
@@ -1141,8 +1294,12 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
             }
             Column(Modifier.weight(1.1f).fillMaxHeight()) {
                 Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    for (s in a.shares) {
+                    a.shares.forEachIndexed { i, s ->
                         val p = trip.passengers.firstOrNull { it.id == s.rider.id }
+                        val ridden = trip.riddenKm.getOrNull(i) ?: 0.0
+                        val capped = i in a.capped
+                        val diff = a.diffFromFair(i)
+                        val pays = trip.includeDriver || !s.rider.isDriver
                         Card(Modifier.fillMaxWidth(), 22) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Initial(s.rider.name, if (s.rider.isDriver) Sub else Blue, if (s.rider.isDriver) Bg else BlueSoft)
@@ -1150,17 +1307,52 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                                 Column(Modifier.weight(1f)) {
                                     Text(s.rider.name, fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = Ink)
                                     val route = "${p?.boardPlace?.label ?: ""} → ${p?.alightPlace?.area?.ifEmpty { p.alightPlace.label } ?: ""}"
+                                    val what = when (a.method) {
+                                        "equal" -> "N분의 1"
+                                        "distance" -> "탄 거리 %.1fkm".format(ridden)
+                                        else -> "몫 %.1fkm".format(s.shareKm)
+                                    }
+                                    val alone = if (a.method == "equal" || s.rider.isDriver) ""
+                                        else ", 혼자면 ${if (a.provisional) "약 " else ""}${won(s.alone)}"
                                     Body(
                                         when {
-                                            a.method == "equal" && s.rider.isDriver -> "운전자 · 내지 않아요"
-                                            a.method == "equal" -> "$route · N분의 1"
-                                            s.rider.isDriver -> "운전자 · 몫 %.1fkm".format(s.shareKm)
-                                            else -> "$route · 몫 %.1fkm · 혼자면 ${won(s.alone)}".format(s.shareKm)
+                                            !pays -> "운전자, 내지 않아요"
+                                            s.rider.isDriver -> "운전자, $what"
+                                            else -> "$route, $what$alone"
                                         },
                                         size = 15
                                     )
+                                    if (diff != null && pays) {
+                                        Body(
+                                            when {
+                                                diff > 0 -> "공정 정산보다 ${won(diff)} 더 내요"
+                                                diff < 0 -> "공정 정산보다 ${won(-diff)} 덜 내요"
+                                                else -> "공정 정산과 같아요"
+                                            },
+                                            if (diff == 0L) Sub else Blue, 15
+                                        )
+                                    }
                                 }
-                                Text(won(s.amount), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = if (s.rider.isDriver) Sub else Ink)
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(won(s.amount), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = if (s.rider.isDriver) Sub else Ink)
+                                    if (capped) {
+                                        Text("혼자 갈 때까지만", fontSize = 13.sp, color = Orange,
+                                            modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0xFFFFF4E5))
+                                                .padding(horizontal = 10.dp, vertical = 3.dp))
+                                    }
+                                    if (a.provisional) Text("임시", fontSize = 13.sp, color = Orange)
+                                }
+                            }
+                        }
+                    }
+                    if (a.driverAbsorbed > 0) {
+                        Card(Modifier.fillMaxWidth(), 22) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("운전자 부담", fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                                    Body("모두 혼자 갈 때 금액까지만 내서 남은 금액이에요", size = 15)
+                                }
+                                Text(won(a.driverAbsorbed), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Sub)
                             }
                         }
                     }
@@ -1192,16 +1384,46 @@ private fun SettleScreen(rpc: Rpc, onDone: () -> Unit, onMessage: (String) -> Un
                         confirming = true
                         scope.launch {
                             val c = chosen ?: return@launch
-                            // one post_settlement, with the toll the driver checked; retry if the network drops
-                            while (!trip.settlementPosted && !TripEngine.postSettlement()) delay(3000)
+                            // one post_settlement, with the toll the driver checked; only a missing network is retried
+                            var result: PostResult = if (trip.settlementPosted) PostResult.Ok else TripEngine.postSettlement()
+                            var tries = 0
+                            while (result == PostResult.Offline && tries < 20) {
+                                tries++
+                                postNote = "네트워크를 기다리는 중이에요 ($tries/20)"
+                                delay(3000)
+                                result = TripEngine.postSettlement()
+                            }
+                            when (result) {
+                                is PostResult.Refused -> {
+                                    val note = TripEngine.refusalMessage(result.code)
+                                    postNote = note
+                                    confirming = false
+                                    onMessage(note)
+                                    return@launch
+                                }
+                                PostResult.Offline -> {
+                                    postNote = "네트워크에 연결되지 않아 올리지 못했어요. 연결되면 다시 눌러 주세요"
+                                    confirming = false
+                                    return@launch
+                                }
+                                PostResult.Ok -> postNote = null
+                            }
                             val a2 = when (c) {
                                 "direct" -> args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret, "p_mode" to "direct")
                                 "new" -> args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret, "p_mode" to "folder", "p_new_folder" to newFolder.ifBlank { "카풀 폴더" })
                                 else -> args("p_code" to trip.code, "p_admin_secret" to trip.adminSecret, "p_mode" to "folder", "p_folder_code" to c)
                             }
-                            runCatching { rpc.call("choose_settlement", a2) }
-                                .onSuccess { onMessage(if (c == "direct") "동승자 페이지에 계좌번호가 보여요" else "카풀 폴더에 쌓았어요"); onDone() }
-                                .onFailure { confirming = false; onMessage("정산 방법을 저장하지 못했어요: ${it.message}") }
+                            try {
+                                rpc.call("choose_settlement", a2)
+                                onMessage(if (c == "direct") "동승자 페이지에 계좌번호가 보여요" else "카풀 폴더에 쌓았어요")
+                                onDone()
+                            } catch (e: RpcException) {
+                                confirming = false
+                                postNote = "정산 방법을 저장하지 못했어요: ${TripEngine.refusalMessage(e.code)}"
+                            } catch (e: Exception) {
+                                confirming = false
+                                postNote = "네트워크에 연결되지 않아 정산 방법을 저장하지 못했어요. 다시 눌러 주세요"
+                            }
                         }
                     }
                 }
@@ -1242,7 +1464,7 @@ private fun FoldersScreen(config: Config, rpc: Rpc, onBack: () -> Unit, onMessag
                         .clickable { openCode = code }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(f.optString("name"), fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                            Body("${if (f.optString("status") == "requested") "정산 중" else "요청 전"} · ${f.optInt("trips")}회", size = 16)
+                            Body("${if (f.optString("status") == "requested") "정산 중" else "요청 전"}, ${f.optInt("trips")}회", size = 16)
                         }
                         Text(won(f.optLong("amount", f.optLong("receivable"))), fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Ink)
                     }
@@ -1258,7 +1480,7 @@ private fun FoldersScreen(config: Config, rpc: Rpc, onBack: () -> Unit, onMessag
                     Spacer(Modifier.height(12.dp))
                     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                         if (requested != null) {
-                            Body("정산 중 · 받았으면 완료로 바꿔요", Blue, 17)
+                            Body("정산 중: 받았으면 완료로 바꿔요", Blue, 17)
                             val pays = requested.optJSONArray("payments") ?: JSONArray()
                             for (i in 0 until pays.length()) {
                                 val p = pays.getJSONObject(i)
@@ -1279,7 +1501,7 @@ private fun FoldersScreen(config: Config, rpc: Rpc, onBack: () -> Unit, onMessag
                         val people = o?.optJSONArray("people") ?: JSONArray()
                         if (people.length() > 0) {
                             Spacer(Modifier.height(12.dp))
-                            Body("요청 전 · 쌓인 금액", Ink, 17)
+                            Body("요청 전: 쌓인 금액", Ink, 17)
                             for (i in 0 until people.length()) {
                                 val p = people.getJSONObject(i)
                                 Row(Modifier.padding(vertical = 6.dp)) {

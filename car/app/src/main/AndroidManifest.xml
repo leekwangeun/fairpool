@@ -5,23 +5,22 @@
         android:name="android.hardware.type.automotive"
         android:required="true" />
 
-    <!-- Vehicle SDK (read only) -->
+    <!-- speech answers on the stop card (Pleos SpeechToText) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="pleos.car.permission.TTS_SERVICE" />
     <uses-permission android:name="pleos.car.permission.STT_SERVICE" />
+    <!-- where boardings and drop-offs happen (Pleos FusedLocation) -->
     <uses-permission android:name="pleos.car.permission.FUSED_LOCATION" />
+    <!-- Vehicle SDK (read only): seats, doors, odometer and gear, fuel economy -->
     <uses-permission android:name="pleos.car.permission.CAR_SEATS" />
     <uses-permission android:name="pleos.car.permission.CAR_DOORS" />
     <uses-permission android:name="pleos.car.permission.CAR_DRIVE" />
     <uses-permission android:name="pleos.car.permission.CAR_ENERGY" />
-    <uses-permission android:name="pleos.car.permission.CAR_INFO" />
     <!-- NaviHelper -->
     <uses-permission android:name="pleos.car.permission.NAVI_ROUTE" />
     <uses-permission android:name="pleos.car.permission.NAVI_ROUTE_SEARCH" />
     <uses-permission android:name="pleos.car.permission.NAVI_CUSTOM_MAP" />
-    <!-- AAOS gear and speed -->
-    <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
+    <!-- AAOS vehicle speed (PERF_VEHICLE_SPEED), for "stopped" -->
     <uses-permission android:name="android.car.permission.CAR_SPEED" />
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -33,7 +32,7 @@
         android:allowBackup="false"
         android:label="페어풀(FairPool)"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
@@ -44,7 +43,8 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- the driving screen (L4) shows only the course, the next stop and the stop card: no typing while moving -->
+            <!-- while CarUxRestrictions apply, the app shows only the driving screen (L4) or a "정차 후 이용" view:
+                 no typing, settings or folders while moving -->
             <meta-data android:name="distractionOptimized" android:value="true" />
         </activity>
 

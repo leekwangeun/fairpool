@@ -53,6 +53,35 @@ android {
     }
 }
 
+/**
+ * aapt2 cannot open files under the non-ASCII repository path, so the few resource files the app needs
+ * (src/main/res-ascii) are copied into the ASCII build folder and handed to AGP as generated resources.
+ */
+abstract class CopyAsciiRes : DefaultTask() {
+    @get:InputDirectory
+    abstract val source: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        source.get().asFile.copyRecursively(out, overwrite = true)
+    }
+}
+
+val copyAsciiRes = tasks.register<CopyAsciiRes>("copyAsciiRes") {
+    source.set(layout.projectDirectory.dir("src/main/res-ascii"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.res?.addGeneratedSourceDirectory(copyAsciiRes, CopyAsciiRes::outputDir)
+    }
+}
+
 dependencies {
     implementation("ai.pleos.playground:Vehicle:2.3.2")
     implementation("ai.pleos.playground:NaviHelper:3.0.5")

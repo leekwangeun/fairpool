@@ -32,7 +32,7 @@
 | `car/` | 차량 앱 (Kotlin, Pleos Connect) |
 | `web/` | 휴대폰 웹: 동승자 페이지, 운전자 휴대폰의 차 연결과 보내기 (React, TypeScript, Vite, Tailwind CSS, MapLibre) |
 | `supabase/migrations/` | 운행 서버의 DB 테이블과 서버 함수(SQL) |
-| `supabase/tests/` | 실제 마이그레이션을 PGlite(Node에서 도는 Postgres)로 돌리는 테스트 47개 |
+| `supabase/tests/` | 실제 마이그레이션을 PGlite(Node에서 도는 Postgres)로 돌리는 테스트 58개 |
 | `devserver/` | Supabase 없이 쓰는 로컬 개발 서버. 같은 마이그레이션을 Supabase와 같은 주소 모양(`POST /rest/v1/rpc/<함수>`)으로 열고 시연 데이터를 넣음 |
 | `docs/` | 서버 설계, 차량 앱 연동 방법(화면별로 부르는 함수), 화면 시안(`docs/screens/`) |
 
@@ -79,7 +79,7 @@ npm run dev     # http://localhost:5173
 ### 4. 테스트
 
 ```bash
-cd supabase && npm install && npm test     # 서버 함수 47개 시나리오
+cd supabase && npm install && npm test     # 서버 함수 58개 시나리오
 cd devserver && npm install && npm test    # 개발 서버 HTTP 응답
 cd web && npm run build                     # 타입 검사와 빌드
 ```

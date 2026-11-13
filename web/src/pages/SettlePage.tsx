@@ -14,6 +14,7 @@ import {
   Field,
   Page,
   PayActions,
+  RecordChanges,
   RideList,
   TextInput,
   josa,
@@ -102,6 +103,7 @@ export default function SettlePage() {
       </Card>
 
       <RideList title="운행별 내역" rides={rides} shown={3} />
+      <RecordChanges changes={me.rides.flatMap((r) => r.changes ?? [])} driverName={page.driver_name} />
 
       {done ? (
         <section className="flex w-full flex-col gap-1 rounded-[20px] bg-[#e3f7eb] px-[18px] py-4">

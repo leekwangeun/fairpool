@@ -399,7 +399,14 @@ test('course shows the origin and my stops, hides others, the destination, and t
   let view = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(2) });
   const json = JSON.stringify(view);
   assert.ok(!json.includes('민지 집') && !json.includes('지훈 집'), 'other stops and the destination stay hidden');
-  assert.equal(view.origin, '가평 MT 숙소');
+  // 태호 gets on at 신촌역, so the origin (often someone's home) is not named for him
+  assert.equal(view.origin, null);
+  assert.equal(view.progress.stops[0].label, null);
+  const minjiView = await rpc(db, 'get_trip', { p_code: code, p_device_key: device(1) });
+  assert.equal(minjiView.origin, '가평 MT 숙소', 'a rider who gets on at the origin sees it');
+  assert.equal(minjiView.progress.stops[0].label, '가평 MT 숙소');
+  assert.equal((await rpc(db, 'get_trip', { p_code: code, p_device_key: device(9) })).origin, null,
+               'the code alone does not name the origin');
   assert.deepEqual(view.progress.stops.map((s) => s.kind), ['start', 'my_pickup', 'other_dropoff', 'my_dropoff']);
   assert.equal(view.progress.stops[3].label, '서대문구 연희동', 'my drop-off is shown at area level');
   assert.equal(view.progress.car.lat, 37.57);

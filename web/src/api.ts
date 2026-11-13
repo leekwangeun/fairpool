@@ -32,7 +32,9 @@ const messages: Record<string, string> = {
   place_needs_location: '장소는 검색 목록에서 골라 주세요.',
   verify_failed: '이름이나 번호가 맞지 않아요.',
   too_many_attempts: '확인을 너무 많이 시도했어요. 1시간 뒤에 다시 해 주세요.',
-  settle_started: '이미 정산을 마친 사람이 있어 바꿀 수 없어요. 정산 완료 체크를 모두 풀면 다시 바꿀 수 있어요.',
+  settle_started: '정산 완료를 한 번이라도 체크한 운행이라 기록을 고칠 수 없어요. 체크를 풀어도 마찬가지예요.',
+  provisional_settlement: '임시 금액이라 아직 정산할 수 없어요. 차에서 금액이 확정되면 다시 해 주세요.',
+  bad_payload: '정산 내용을 읽을 수 없어요. 차에서 다시 보내 주세요.',
   not_direct: '바로 정산한 운행에서만 정산 완료를 체크할 수 있어요.',
   bad_kind: '문제 종류를 골라 주세요.',
   record_deleted: '탑승 기록을 지운 사람은 정산 완료를 풀 수 없어요.',
@@ -139,8 +141,13 @@ export type Share = {
   to?: string;
   is_me?: boolean;
   passenger_id?: string | null;
-  // what this passenger would have paid alone (optional, sent by the car)
+  // what this passenger would have paid alone (optional, sent by the car); only on my own row
   alone?: number;
+  share_km?: number;
+  // lowered so it is not more than going alone
+  capped?: boolean;
+  // distances not from the road router yet: the amount may still change
+  provisional?: boolean;
 };
 
 // M3-1 "어떤 문제가 있나요?"
@@ -160,7 +167,19 @@ export type Settlement = {
   total?: number;
   fuel?: { distance_km: number; efficiency_km_l: number; amount: number };
   toll?: number;
+  // the amount is not final yet; no account is shown and nobody can be marked paid
+  provisional?: boolean;
+  // rounding remainder the driver took on
+  driver_absorbed?: number;
   shares: Share[];
+};
+
+// A change the driver made to my ride record (seat, boarding time, drop-off time).
+export type RecordChange = {
+  field: 'seat' | 'boarded_at' | 'alighted_at';
+  old: string | null;
+  new: string | null;
+  changed_at: string;
 };
 
 export type Stop = {
@@ -197,6 +216,7 @@ export type PublicTrip = {
     boarded: boolean;
     alighted: boolean;
     place_removed: boolean;
+    record_changes: RecordChange[];
   } | null;
   progress: { car: { lat: number; lng: number } | null; stops: Stop[] } | null;
   settlement: Settlement | null;
@@ -238,6 +258,7 @@ export type SettlePage = {
     paid: boolean;
     rides: {
       date: string; title: string; amount: number; from?: string; to?: string; km?: number; total: number; driver: number;
+      provisional: boolean; capped: boolean; changes: RecordChange[];
       // who rode along and each one's share (M6); places only for this rider
       people: { name: string; amount: number; is_me: boolean }[];
     }[];
@@ -262,6 +283,7 @@ export type ShareCard = {
   total: number | null;
   people: { name: string; amount: number | null; from?: string | null; to?: string | null; trips?: number; paid: boolean }[];
   rides?: { title: string; date: string; shares: { name: string; amount: number; from?: string | null; to?: string | null }[] }[];
+  provisional?: boolean;
   bank: Bank | null;
 };
 

@@ -271,7 +271,7 @@ test('car corrections: direct trip shows the new amount, folder sums follow, req
     p_payload: { total: 1, shares: [] } }), /batch_locked/, 'passengers were told a fixed sum');
 });
 
-test('once anyone in a trip has settled, nothing in it can be corrected until every tick is undone', async () => {
+test('once anyone in a trip has been marked paid, nothing in it can be corrected, even after the tick is undone', async () => {
   const db = await freshDb();
   const { driver_secret, vehicle_secret } = await driverWithCar(db);
   const t = await ride(db, vehicle_secret, [[1, '수진', 2430], [2, '민호', 1780]]);
@@ -293,13 +293,15 @@ test('once anyone in a trip has settled, nothing in it can be corrected until ev
   assert.equal(v.settlement.shares.find((s) => s.is_me).amount, 1780);
   assert.equal(v.corrections, 0);
 
-  // with every 정산 완료 tick undone the trip can be corrected again
+  // undoing the tick shows the account again, but money may already have moved: records stay locked
   await rpc(db, 'mark_paid', { p_code: t.code, p_admin_secret: t.admin_secret, p_passenger_id: t.ids['수진'], p_paid: false });
-  const fixed = await correct(2500, 1500);
-  assert.equal(fixed.settlement.shares.find((s) => s.name === '민호').amount, 1500);
-  assert.equal(fixed.revisions.length, 1);
-  await rpc(db, 'mark_passenger', { p_code: t.code, p_admin_secret: t.admin_secret, p_passenger_id: t.ids['민호'],
-                                    p_seat: '2열 오른쪽' });
+  assert.equal((await rpc(db, 'get_trip', { p_code: t.code, p_device_key: device(1) })).bank.account, '111-222-333');
+  await assert.rejects(correct(2500, 1500), /settle_started/);
+  await assert.rejects(rpc(db, 'mark_passenger', { p_code: t.code, p_admin_secret: t.admin_secret,
+                                                   p_passenger_id: t.ids['민호'], p_alighted: false }), /settle_started/);
+  await assert.rejects(rpc(db, 'choose_settlement', { p_code: t.code, p_admin_secret: t.admin_secret, p_mode: 'folder',
+                                                      p_new_folder: '출근 카풀' }), /settle_started/);
+  assert.equal((await rpc(db, 'get_trip_admin', { p_code: t.code, p_admin_secret: t.admin_secret })).revisions.length, 0);
 });
 
 test('a deleted ride record keeps the trip settled and stays without a name', async () => {

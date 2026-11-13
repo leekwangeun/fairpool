@@ -167,6 +167,11 @@ create table public.trips (
   -- after settlement: 'direct' (바로 정산) or 'folder' (stacked into batch_id)
   settle_mode    text check (settle_mode in ('direct', 'folder')),
   batch_id       uuid references public.folder_batches(id) on delete set null,
+  -- the first time anyone's part was marked as paid (바로 정산 or folder batch). Undoing the tick does not
+  -- clear it: from then on the ride records can no longer be corrected (_settle_started)
+  paid_ever_at   timestamptz,
+  -- purge_old_locations ran for this trip: stops gone, place names in the settlement cut to area level
+  locations_purged_at timestamptz,
   created_at     timestamptz not null default now(),
   started_at     timestamptz,
   ended_at       timestamptz
@@ -178,6 +183,8 @@ create table public.trip_passengers (
   name            text not null,
   pickup          jsonb,                 -- null = gets on at the trip origin; cleared 24 h after the trip ends
   dropoff         jsonb,
+  -- chose "출발지에서 같이 타요" when joining: only these riders see the trip origin's name
+  at_origin       boolean not null default false,
   device_key_hash text not null,
   phone4_hash     text,                  -- last 4 digits of the phone, hashed, to re-open on another device
   -- name + last 4 digits hashed per driver (or car), so the same person on a new phone is still one
@@ -207,9 +214,12 @@ create table public.verify_attempts (
   failed_at       timestamptz not null default now()
 );
 
--- Settlement computed in the car and published to passengers. Payload:
--- {rule, include_driver, total, fuel:{distance_km, efficiency_km_l, amount}, toll,
---  shares:[{passenger_id, name, role:'driver'|'passenger', amount, km, from, to}]}
+-- Settlement computed in the car and published to passengers. Payload (see _clean_settlement):
+-- {rule:'shapley'|'distance'|'equal', include_driver, total, fuel:{distance_km, efficiency_km_l, amount},
+--  toll, distance_source, provisional, driver_absorbed, coalitions,
+--  shares:[{passenger_id, name, role:'driver'|'passenger', amount, km, share_km, alone, capped, provisional,
+--           from, to}]}
+-- Passengers get only part of it (_settlement_for).
 create table public.settlements (
   trip_id    uuid primary key references public.trips(id) on delete cascade,
   payload    jsonb not null,
@@ -223,6 +233,21 @@ create table public.settlement_revisions (
   payload     jsonb not null,
   reason      text,
   replaced_at timestamptz not null default now()
+);
+
+-- Changes to a ride record made through mark_passenger (seat, boarding and drop-off times): who, what and
+-- when. The passenger it is about sees them on their settlement page. The first recording of an event is
+-- not a change; undoing it, setting it again or changing it after the settlement is.
+create table public.record_revisions (
+  id           uuid primary key default gen_random_uuid(),
+  seq          bigint generated always as identity,
+  trip_id      uuid not null references public.trips(id) on delete cascade,
+  passenger_id uuid not null references public.trip_passengers(id) on delete cascade,
+  field        text not null check (field in ('seat', 'boarded_at', 'alighted_at')),
+  old_value    jsonb,
+  new_value    jsonb,
+  changed_by   text not null check (changed_by in ('car', 'trip_admin')),
+  changed_at   timestamptz not null default now()
 );
 
 -- "정산에 문제가 있어요" from a passenger page.
@@ -256,6 +281,8 @@ create index on public.trip_passengers (trip_id);
 create index on public.trip_issues (trip_id);
 create index on public.trips (batch_id);
 create index on public.settlement_revisions (trip_id);
+create index on public.record_revisions (passenger_id, seq);
+create index on public.trips (locations_purged_at, ended_at);
 create index on public.verify_attempts (scope, failed_at);
 -- one batch being settled and one stacking batch per folder, even if 합쳐서 정산하기 is pressed twice
 create unique index folder_batches_one_requested on public.folder_batches (folder_id) where status = 'requested';
@@ -274,6 +301,7 @@ alter table public.folders         enable row level security;
 alter table public.folder_batches  enable row level security;
 alter table public.batch_payments  enable row level security;
 alter table public.settlement_revisions enable row level security;
+alter table public.record_revisions enable row level security;
 alter table public.verify_attempts enable row level security;
 alter table public.share_requests  enable row level security;
 
@@ -391,8 +419,9 @@ language sql stable set search_path = public, extensions as $$
 $$;
 
 -- What one passenger may see of the course: the origin, their own stops, and anonymous
--- "동승자 1명" stops for everyone else. The driver's destination is dropped. The car position is
--- shared only until this passenger has boarded.
+-- "동승자 1명" stops for everyone else. The driver's destination is dropped, and the origin's name is
+-- only for riders who get on there (at_origin). The car position is shared only until this passenger
+-- has boarded.
 create or replace function public._progress_for(p jsonb, me public.trip_passengers) returns jsonb
 language sql stable set search_path = public, extensions as $$
   select case when p is null then null else jsonb_build_object(
@@ -400,7 +429,9 @@ language sql stable set search_path = public, extensions as $$
     'stops', (select coalesce(jsonb_agg(
                 case
                   when s ->> 'kind' = 'start' then
-                    jsonb_build_object('kind', 'start', 'label', s -> 'label', 'time', s -> 'time', 'state', s -> 'state')
+                    jsonb_build_object('kind', 'start',
+                                       'label', case when me.id is not null and me.at_origin then s -> 'label' end,
+                                       'time', s -> 'time', 'state', s -> 'state')
                   when me.id is not null and s ->> 'passenger_id' = me.id::text then
                     jsonb_build_object('kind', 'my_' || (s ->> 'kind'),
                                        'label', case when s ->> 'kind' = 'dropoff' then coalesce(s -> 'area', s -> 'label')
@@ -416,19 +447,124 @@ language sql stable set search_path = public, extensions as $$
   end
 $$;
 
--- Settlement as one passenger sees it: everyone's amount, "is_me" on their own row, no ids, and where
--- others got on and off left out.
+-- The three rules the car computes. Older cars sent 'segment_split' for the distance rule.
+create or replace function public._rule(p text) returns text
+language sql immutable set search_path = public, extensions as $$
+  select case when p in ('shapley', 'distance', 'equal') then p
+              when p in ('segment_split', 'proportional') then 'distance' end
+$$;
+
+-- Settlement as one passenger sees it. The trip-level figures (rule, totals, fuel, toll, whether the
+-- amounts are provisional, what the driver took on) and, for each row, only the name, role and amount.
+-- The passenger's own row also keeps its basis (km, alone cost, from and to, capped). Ids, the
+-- coalition table and anything else in the car's payload are left out.
 create or replace function public._settlement_for(p jsonb, me public.trip_passengers) returns jsonb
 language sql stable set search_path = public, extensions as $$
   select case when p is null then null else
-    (p - 'shares') || jsonb_build_object('shares', (
+    (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb) from jsonb_each(p)
+     where key in ('include_driver', 'total', 'fuel', 'toll', 'provisional', 'driver_absorbed'))
+    || jsonb_strip_nulls(jsonb_build_object('rule', public._rule(p ->> 'rule')))
+    || jsonb_build_object('shares', (
       select coalesce(jsonb_agg(
                case when me.id is not null and s ->> 'passenger_id' = me.id::text
-                    then (s - 'passenger_id') || jsonb_build_object('is_me', true)
-                    else (s - 'passenger_id' - 'from' - 'to' - 'km') || jsonb_build_object('is_me', false) end
+                    then (select coalesce(jsonb_object_agg(key, value), '{}'::jsonb) from jsonb_each(s)
+                          where key in ('name', 'role', 'amount', 'km', 'share_km', 'alone', 'capped', 'provisional',
+                                        'from', 'to'))
+                         || jsonb_build_object('is_me', true)
+                    else jsonb_strip_nulls(jsonb_build_object('name', s -> 'name', 'role', s -> 'role',
+                                                              'amount', s -> 'amount'))
+                         || jsonb_build_object('is_me', false) end
              order by ord), '[]'::jsonb)
-      from jsonb_array_elements(p -> 'shares') with ordinality as x(s, ord)))
+      from jsonb_array_elements(case when jsonb_typeof(p -> 'shares') = 'array' then p -> 'shares' else '[]'::jsonb end)
+           with ordinality as x(s, ord)))
   end
+$$;
+
+-- What the car posts, in the shape the server keeps. Older payloads still work:
+--   rule: 'shapley' | 'distance' | 'equal' ('segment_split' becomes 'distance'; anything else the trip's rule)
+--   include_driver: also accepted as driver_included
+--   provisional: true when the car says so, when distance_source is there and is not 'osrm', or when any
+--     row is provisional (_provisional)
+--   driver_absorbed: the remainder the driver took on, sent as driver_absorbed, driver_remainder,
+--     remainder (a number or {amount}) or a share row with role 'remainder'; that row leaves the shares
+--   per row capped and provisional are kept only as true/false
+create or replace function public._clean_settlement(p jsonb, t public.trips) returns jsonb
+language plpgsql stable set search_path = public, extensions as $$
+declare
+  r jsonb := p;
+  absorbed numeric;
+  num text := '^-?[0-9]+(\.[0-9]+)?$';
+begin
+  if r is null or jsonb_typeof(r) <> 'object' then raise exception 'bad_payload'; end if;
+  r := r || jsonb_build_object('rule', coalesce(public._rule(r ->> 'rule'), t.rule));
+  if not (r ? 'include_driver') and jsonb_typeof(r -> 'driver_included') = 'boolean' then
+    r := r || jsonb_build_object('include_driver', r -> 'driver_included');
+  end if;
+  r := r - 'driver_included';
+  if jsonb_typeof(r -> 'provisional') <> 'boolean' then r := r - 'provisional'; end if;
+  absorbed := coalesce(
+    case when r ->> 'driver_absorbed' ~ num then (r ->> 'driver_absorbed')::numeric end,
+    case when r ->> 'driver_remainder' ~ num then (r ->> 'driver_remainder')::numeric end,
+    case when r ->> 'remainder' ~ num then (r ->> 'remainder')::numeric end,
+    case when r #>> '{remainder,amount}' ~ num then (r #>> '{remainder,amount}')::numeric end,
+    (select sum((x ->> 'amount')::numeric) from jsonb_array_elements(
+       case when jsonb_typeof(r -> 'shares') = 'array' then r -> 'shares' else '[]'::jsonb end) x
+     where x ->> 'role' = 'remainder' and x ->> 'amount' ~ num));
+  r := r - 'driver_absorbed' - 'driver_remainder' - 'remainder';
+  if absorbed is not null then r := r || jsonb_build_object('driver_absorbed', absorbed); end if;
+  if jsonb_typeof(r -> 'shares') = 'array' then
+    r := jsonb_set(r, '{shares}', (
+      select coalesce(jsonb_agg(
+               (x - 'capped' - 'provisional')
+               || case when jsonb_typeof(x -> 'capped') = 'boolean' then jsonb_build_object('capped', x -> 'capped')
+                       else '{}'::jsonb end
+               || case when jsonb_typeof(x -> 'provisional') = 'boolean'
+                       then jsonb_build_object('provisional', x -> 'provisional') else '{}'::jsonb end
+             order by ord), '[]'::jsonb)
+      from jsonb_array_elements(r -> 'shares') with ordinality as y(x, ord)
+      where x ->> 'role' is distinct from 'remainder'));
+  end if;
+  -- one trip-level answer once the car says anything about it
+  if r ? 'provisional' or r ? 'distance_source' or public._provisional(r) then
+    r := r || jsonb_build_object('provisional', public._provisional(r));
+  end if;
+  return r;
+end $$;
+
+-- Amounts not final yet (distances not from the road router): nobody is asked to pay until the car posts
+-- the settlement again with final amounts, so the lock that comes with the first payment never meets a
+-- recalculation.
+create or replace function public._provisional(p jsonb) returns boolean
+language sql immutable set search_path = public, extensions as $$
+  select coalesce(p -> 'provisional' = 'true'::jsonb
+      or (p ? 'distance_source' and coalesce(p ->> 'distance_source', '') <> 'osrm')
+      or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(p -> 'shares') = 'array'
+                                                         then p -> 'shares' else '[]'::jsonb end) x
+                 where x -> 'provisional' = 'true'::jsonb), false)
+$$;
+
+-- After the retention window the place names in a settlement go down to area level ("마포구 망원동"),
+-- taken from the rider's stop (or the trip origin for riders who got on there) while it is still known;
+-- without an area the name is dropped.
+create or replace function public._coarse_shares(p jsonb, t public.trips) returns jsonb
+language sql stable set search_path = public, extensions as $$
+  select case when jsonb_typeof(p -> 'shares') <> 'array' then p else jsonb_set(p, '{shares}', (
+    select coalesce(jsonb_agg(
+             (x - 'from' - 'to') || jsonb_strip_nulls(jsonb_build_object(
+               'from', case when x ? 'from' and q.id is not null
+                            then coalesce(q.pickup ->> 'area', case when q.at_origin then t.origin ->> 'area' end) end,
+               'to', case when x ? 'to' and q.id is not null then q.dropoff ->> 'area' end))
+           order by ord), '[]'::jsonb)
+    from jsonb_array_elements(p -> 'shares') with ordinality as y(x, ord)
+    left join public.trip_passengers q on q.trip_id = t.id and q.id::text = x ->> 'passenger_id')) end
+$$;
+
+-- Ride record changes this passenger may see (record_revisions), oldest first.
+create or replace function public._record_changes(p_passenger uuid) returns jsonb
+language sql stable set search_path = public, extensions as $$
+  select coalesce(jsonb_agg(jsonb_build_object('field', field, 'old', old_value, 'new', new_value,
+                                               'changed_at', changed_at) order by seq), '[]'::jsonb)
+  from public.record_revisions where passenger_id = p_passenger
 $$;
 
 -- Members of a favourite and the places kept for its next trip (labels only).
@@ -622,7 +758,8 @@ begin
   return jsonb_build_object(
     'code', t.code,
     'title', t.title,
-    'origin', t.origin ->> 'label',
+    -- where the car starts is often someone's home: only riders who get on there see its name
+    'origin', case when me.id is not null and me.at_origin then t.origin ->> 'label' end,
     'status', t.status,
     'include_driver', t.include_driver,
     'rule', t.rule,
@@ -642,7 +779,9 @@ begin
             'name', me.name, 'pickup', me.pickup, 'dropoff', me.dropoff, 'save_place', me.save_place,
             'estimate', me.estimate, 'boarded', me.boarded_at is not null,
             'alighted', me.alighted_at is not null,
-            'place_removed', me.place_removed_at is not null) end,
+            'place_removed', me.place_removed_at is not null,
+            -- seat, boarding and drop-off changes the driver made to this rider's record
+            'record_changes', public._record_changes(me.id)) end,
     'progress', public._progress_for(t.progress, me),
     -- folder trips have no settlement page of their own (each rider's part goes to the batch page)
     'settlement', case when t.settle_mode = 'folder' or me.id is null then null
@@ -656,6 +795,7 @@ begin
     -- the driver marks them paid. Folder trips show it only on the batch's settlement page.
     'bank', case when me.id is not null and d.bank_consent_at is not null
                    and t.status = 'settled' and t.settle_mode = 'direct' and me.paid_at is null
+                   and not public._provisional(s.payload)
                    and exists (select 1 from jsonb_array_elements(s.payload -> 'shares') x
                                where x ->> 'passenger_id' = me.id::text)
               then jsonb_build_object('bank_name', d.bank_name, 'account', public._dec(d.bank_account),
@@ -697,9 +837,9 @@ begin
   if not known and (select count(*) from public.trip_passengers where trip_id = t.id) >= t.seats then
     raise exception 'trip_full';
   end if;
-  insert into public.trip_passengers (trip_id, name, pickup, dropoff, device_key_hash, phone4_hash, person_hash,
-                                      save_place)
-  values (t.id, trim(p_name), p_pickup, p_dropoff, public._hash(p_device_key),
+  insert into public.trip_passengers (trip_id, name, pickup, dropoff, at_origin, device_key_hash, phone4_hash,
+                                      person_hash, save_place)
+  values (t.id, trim(p_name), p_pickup, p_dropoff, p_pickup is null, public._hash(p_device_key),
           case when p_phone4 ~ '^[0-9]{4}$' then public._hash(t.id::text || p_phone4) end,
           public._person_hash(coalesce(t.driver_id, t.vehicle_id, t.id), p_name, p_phone4),
           true)
@@ -708,6 +848,8 @@ begin
         -- after boarding the pickup is part of the record; the drop-off can still change
         pickup = case when public.trip_passengers.boarded_at is not null then public.trip_passengers.pickup
                       else excluded.pickup end,
+        at_origin = case when public.trip_passengers.boarded_at is not null then public.trip_passengers.at_origin
+                         else excluded.at_origin end,
         dropoff = coalesce(excluded.dropoff, public.trip_passengers.dropoff),
         phone4_hash = coalesce(excluded.phone4_hash, public.trip_passengers.phone4_hash),
         person_hash = coalesce(excluded.person_hash, public.trip_passengers.person_hash);
@@ -892,10 +1034,11 @@ begin
     from jsonb_array_elements(payload -> 'shares') with ordinality as y(x, ord)))
   where trip_id = t.id and payload ? 'shares';
   update public.trip_passengers set
-    name = anon, pickup = null, dropoff = null, seat = null, boarded_at = null, alighted_at = null,
+    name = anon, pickup = null, dropoff = null, at_origin = false, seat = null, boarded_at = null, alighted_at = null,
     phone4_hash = null, person_hash = null, save_place = false, record_deleted_at = now(),
     exact_stops = null, estimate = null, device_key_hash = public._hash(id::text || ':deleted')
   where id = p.id;
+  delete from public.record_revisions where passenger_id = p.id;
   -- in a folder batch, the person's line loses the name once none of their rides in it is left
   update public.batch_payments bp set name = anon
   where bp.batch_id = t.batch_id and bp.person_key = pkey
@@ -953,11 +1096,13 @@ begin
 end $$;
 
 -- Once anyone in a trip has settled (paid), nothing in it can be corrected: Shapley shares depend on one
--- another, so changing anyone's ride would change the part that was already paid. Undoing every
--- 정산 완료 tick (바로 정산) opens corrections again; a requested folder batch stays batch_locked.
+-- another, so changing anyone's ride would change the part that was already paid. This holds even after
+-- the tick is undone (paid_ever_at): money may already have moved; a requested folder batch stays
+-- batch_locked as well.
 create or replace function public._settle_started(t public.trips) returns boolean
 language sql stable set search_path = public, extensions as $$
-  select exists (select 1 from public.trip_passengers p where p.trip_id = t.id and public._settle_done(t, p))
+  select (select paid_ever_at is not null from public.trips where id = t.id)
+      or exists (select 1 from public.trip_passengers p where p.trip_id = t.id and public._settle_done(t, p))
 $$;
 
 -- Seat matching and boarding events reported by the car (also corrections from the arrival screen).
@@ -967,13 +1112,18 @@ create or replace function public.mark_passenger(
   p_unchecked boolean default false     -- true: recorded while the driver did not confirm it (L5-3)
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
-declare t public.trips := public._trip_admin(p_code, p_admin_secret);
+declare
+  t public.trips := public._trip_admin(p_code, p_admin_secret);
+  before public.trip_passengers;
+  after public.trip_passengers;
 begin
   if t.status = 'cancelled' then raise exception 'trip_closed'; end if;
   if t.batch_id is not null and (select status from public.folder_batches where id = t.batch_id) <> 'open' then
     raise exception 'batch_locked';
   end if;
   if public._settle_started(t) then raise exception 'settle_started'; end if;
+  select * into before from public.trip_passengers
+  where id = p_passenger_id and trip_id = t.id and record_deleted_at is null for update;
   -- false undoes a misrecognised event (확인 카드 "잘못 인식"); undoing boarding undoes the drop-off too
   update public.trip_passengers set
     seat = coalesce(p_seat, seat),
@@ -986,7 +1136,22 @@ begin
     alight_unchecked = case when p_boarded is false then false
                             when p_alighted is not null then p_alighted and coalesce(p_unchecked, false)
                             else alight_unchecked end
-  where id = p_passenger_id and trip_id = t.id and record_deleted_at is null;
+  where id = p_passenger_id and trip_id = t.id and record_deleted_at is null
+  returning * into after;
+  -- history: every change of a value already recorded, any change once the trip is settled, and the
+  -- value set again after such a change. The first boarding or drop-off as it happens is not listed.
+  if before.id is not null then
+    insert into public.record_revisions (trip_id, passenger_id, field, old_value, new_value, changed_by)
+    select t.id, before.id, v.field, v.o, v.n,
+           case when t.admin_hash = public._hash(p_admin_secret) then 'trip_admin' else 'car' end
+    from (values (1, 'boarded_at', to_jsonb(before.boarded_at), to_jsonb(after.boarded_at)),
+                 (2, 'alighted_at', to_jsonb(before.alighted_at), to_jsonb(after.alighted_at)),
+                 (3, 'seat', to_jsonb(before.seat), to_jsonb(after.seat))) v(k, field, o, n)
+    where v.o is distinct from v.n
+      and (v.o is not null or t.status = 'settled'
+           or exists (select 1 from public.record_revisions r where r.passenger_id = before.id and r.field = v.field))
+    order by v.k;
+  end if;
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
@@ -1000,9 +1165,11 @@ language plpgsql security definer set search_path = public, extensions as $$
 declare
   t public.trips := public._trip_admin(p_code, p_admin_secret);
   old public.settlements;
-  clean jsonb := p_payload;
+  clean jsonb;
 begin
   if t.status = 'cancelled' then raise exception 'trip_closed'; end if;
+  p_payload := public._clean_settlement(p_payload, t);
+  clean := p_payload;
   -- every share must belong to a passenger of this trip
   if jsonb_typeof(p_payload -> 'shares') = 'array' and exists (
        select 1 from jsonb_array_elements(p_payload -> 'shares') x
@@ -1021,6 +1188,8 @@ begin
                                      else x end order by ord), '[]'::jsonb)
       from jsonb_array_elements(p_payload -> 'shares') with ordinality as y(x, ord)));
   end if;
+  -- posted after the retention window (a trip left running for a day): no exact place names either
+  if t.locations_purged_at is not null then clean := public._coarse_shares(clean, t); end if;
   select * into old from public.settlements where trip_id = t.id;
   if old.trip_id is not null then
     if t.batch_id is not null and (select status from public.folder_batches where id = t.batch_id) <> 'open' then
@@ -1189,6 +1358,9 @@ begin
     select coalesce(jsonb_agg(jsonb_build_object(
              'date', coalesce(t.ended_at, t.created_at), 'title', t.title,
              'amount', (x ->> 'amount')::numeric, 'from', x ->> 'from', 'to', x ->> 'to', 'km', x -> 'km',
+             'provisional', coalesce((x ->> 'provisional')::boolean, (st.payload ->> 'provisional')::boolean, false),
+             'capped', coalesce((x ->> 'capped')::boolean, false),
+             'changes', public._record_changes(p.id),
              'total', (st.payload ->> 'total')::numeric,
              'driver', (select coalesce(sum((y ->> 'amount')::numeric), 0)
                         from jsonb_array_elements(st.payload -> 'shares') y where y ->> 'role' = 'driver'),
@@ -1330,20 +1502,28 @@ begin
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
--- 바로 정산: the driver ticks a passenger as paid; their page then hides the account. Untick everyone to
--- correct the trip again. A deleted ride record stays settled: its stops are gone, so it cannot be redone.
+-- 바로 정산: the driver ticks a passenger as paid; their page then hides the account. A tick can be
+-- undone (the account shows again), but the trip's records stay locked from the first tick on
+-- (paid_ever_at). A deleted ride record stays settled: its stops are gone, so it cannot be redone.
 create or replace function public.mark_paid(p_code text, p_admin_secret text, p_passenger_id uuid,
                                             p_paid boolean default true) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare t public.trips := public._trip_admin(p_code, p_admin_secret);
 begin
   if t.settle_mode is distinct from 'direct' then raise exception 'not_direct'; end if;
+  -- provisional amounts are not paid: the car posts the final ones first
+  if p_paid and public._provisional((select payload from public.settlements where trip_id = t.id)) then
+    raise exception 'provisional_settlement';
+  end if;
   if not p_paid and exists (select 1 from public.trip_passengers
                             where id = p_passenger_id and trip_id = t.id and record_deleted_at is not null) then
     raise exception 'record_deleted';
   end if;
   update public.trip_passengers set paid_at = case when p_paid then coalesce(paid_at, now()) end
   where id = p_passenger_id and trip_id = t.id;
+  if p_paid and found then
+    update public.trips set paid_ever_at = coalesce(paid_ever_at, now()) where id = t.id;
+  end if;
   return public.get_trip_admin(p_code, p_admin_secret);
 end $$;
 
@@ -1422,6 +1602,11 @@ begin
     raise exception 'batch_in_progress';
   end if;
   if not exists (select 1 from public.trips where batch_id = o) then raise exception 'nothing_to_settle'; end if;
+  -- the sums are fixed here, so every trip in them must have its final amounts
+  if exists (select 1 from public.trips t join public.settlements st on st.trip_id = t.id
+             where t.batch_id = o and public._provisional(st.payload)) then
+    raise exception 'provisional_settlement';
+  end if;
   -- one line per person: the same name and digits on a new phone are still one person
   insert into public.batch_payments (batch_id, person_key, device_key_hash, device_hashes, name, amount, trips)
   select o, public._person_key(p), min(p.device_key_hash), array_agg(distinct p.device_key_hash), max(p.name),
@@ -1485,6 +1670,10 @@ begin
   end if;
   update public.batch_payments set paid_at = case when p_paid then coalesce(paid_at, now()) end
   where id = p_payment_id;
+  -- the trips in the batch stay uncorrectable even if the request is later cancelled (_settle_started)
+  if p_paid then
+    update public.trips set paid_ever_at = coalesce(paid_ever_at, now()) where batch_id = b.id;
+  end if;
   if not exists (select 1 from public.batch_payments where batch_id = b.id and paid_at is null) then
     update public.folder_batches set status = 'done', done_at = coalesce(done_at, now()) where id = b.id;
   else
@@ -1535,7 +1724,8 @@ begin
                from jsonb_array_elements(s.payload -> 'shares') with ordinality as y(x, ord)
                left join public.trip_passengers p on p.id::text = x ->> 'passenger_id'
                where x ->> 'role' is distinct from 'driver'),
-    'bank', case when t.settle_mode = 'direct' then public._bank_of(d) end);
+    'provisional', public._provisional(s.payload),
+    'bank', case when t.settle_mode = 'direct' and not public._provisional(s.payload) then public._bank_of(d) end);
 end $$;
 
 -- A requested folder batch: each person's sum, every trip in it with its shares and routes, the account.
@@ -1710,10 +1900,10 @@ begin
   values (public._new_trip_code(), public._hash(s), c.driver_id, v.id, c.id, c.title, c.origin, c.destination,
           c.include_driver, c.seats, c.rule)
   returning * into t;
-  insert into public.trip_passengers (trip_id, name, pickup, dropoff, device_key_hash, phone4_hash, person_hash,
-                                      save_place)
-  select t.id, name, pickup, dropoff, coalesce(device_key_hash, public._hash(id::text)), phone4_hash, person_hash,
-         pickup is not null or dropoff is not null
+  insert into public.trip_passengers (trip_id, name, pickup, dropoff, at_origin, device_key_hash, phone4_hash,
+                                      person_hash, save_place)
+  select t.id, name, pickup, dropoff, pickup is null, coalesce(device_key_hash, public._hash(id::text)), phone4_hash,
+         person_hash, pickup is not null or dropoff is not null
   from public.carpool_members where carpool_id = c.id;
   return jsonb_build_object('trip_id', t.id, 'code', t.code, 'admin_secret', s);
 end $$;
@@ -2072,18 +2262,46 @@ end $$;
 
 -- ---------------------------------------------------------------- retention
 
--- Run daily (see the cron migration): stops are kept only while they are needed.
+-- A place the driver keeps in a favourite (its origin or destination) keeps its coordinates on old trips.
+create or replace function public._saved_place(p_driver uuid, p_place jsonb) returns boolean
+language sql stable set search_path = public, extensions as $$
+  select p_driver is not null and p_place ? 'lat' and exists (
+    select 1 from public.carpools c
+    cross join lateral (values (c.origin), (c.destination)) v(pl)
+    where c.driver_id = p_driver and c.archived_at is null
+      and v.pl ->> 'lat' = p_place ->> 'lat' and v.pl ->> 'lng' = p_place ->> 'lng')
+$$;
+
+-- Run every hour (see the cron migration). 24 hours after a trip ended (or started, for a trip never
+-- settled): every rider's stops and the exact copies kept for favourites go, place names in the
+-- settlement and its corrections go down to area level, and the trip's own start and end lose their
+-- coordinates unless the driver keeps them in a favourite.
 create or replace function public.purge_old_locations() returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
-declare n_loc int; n_old int;
+declare
+  n_loc int := 0;
+  n int;
+  n_old int;
+  t public.trips;
 begin
-  update public.trip_passengers p set pickup = null, dropoff = null, exact_stops = null
-  from public.trips t
-  where p.trip_id = t.id and t.ended_at < now() - interval '24 hours'
-    and (p.pickup is not null or p.dropoff is not null or p.exact_stops is not null);
-  get diagnostics n_loc = row_count;
-  update public.trips set progress = null
-  where ended_at < now() - interval '24 hours' and progress is not null;
+  for t in select * from public.trips
+           where locations_purged_at is null and coalesce(ended_at, started_at) < now() - interval '24 hours'
+           for update loop
+    update public.settlements set payload = public._coarse_shares(payload, t) where trip_id = t.id;
+    update public.settlement_revisions set payload = public._coarse_shares(payload, t) where trip_id = t.id;
+    update public.trip_passengers set pickup = null, dropoff = null, exact_stops = null
+    where trip_id = t.id and (pickup is not null or dropoff is not null or exact_stops is not null);
+    get diagnostics n = row_count;
+    n_loc := n_loc + n;
+    update public.trips set
+      origin = case when public._saved_place(t.driver_id, t.origin) then origin
+                    else nullif(origin - 'lat' - 'lng' - 'address', '{}'::jsonb) end,
+      destination = case when public._saved_place(t.driver_id, t.destination) then destination
+                         else nullif(destination - 'lat' - 'lng' - 'address', '{}'::jsonb) end,
+      progress = null,
+      locations_purged_at = now()
+    where id = t.id;
+  end loop;
   update public.trips set status = 'cancelled', ended_at = now()
   where (status = 'preparing' and created_at < now() - interval '7 days')
      or (status = 'in_progress' and coalesce(started_at, created_at) < now() - interval '7 days');

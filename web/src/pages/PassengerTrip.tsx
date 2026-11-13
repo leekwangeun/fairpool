@@ -19,6 +19,7 @@ import {
   Page,
   PayActions,
   PlaceSearch,
+  RecordChanges,
   RideList,
   TextInput,
   usePolling,
@@ -186,6 +187,7 @@ function Join({
             자리 {trip.seats}개 중 {trip.seats_left}개 남음
           </Chip>
           <Chip>{ruleName[trip.rule]}</Chip>
+          <Chip>{trip.include_driver ? '운전자 몫 포함' : '운전자 몫 빼고 나눔'}</Chip>
           <Link to={`/t/${trip.code}/how`} aria-label="계산 방법 보기">
             <img src={iconInfo} width={22} height={22} alt="" />
           </Link>
@@ -207,7 +209,7 @@ function Join({
               selected={!onTheWay}
               onClick={() => setOnTheWay(false)}
               title="출발지에서 같이 타요"
-              sub={trip.origin ?? '운전자와 같은 곳에서 출발해요'}
+              sub={trip.origin ?? '고르면 출발지 이름이 보여요'}
             />
             <OptionCard selected={onTheWay} onClick={() => setOnTheWay(true)} title="가는 길에 태워 주세요" sub="장소를 검색해 정해요" />
           </div>
@@ -218,15 +220,27 @@ function Join({
         </Field>
         <p className="t-caption text-faint">
           {trip.favourite
-            ? '정확한 위치는 운행이 끝나면 지워요. 즐겨찾기 카풀이라 다음 운행을 위해 탈 곳과 내릴 곳이 저장되고, 지우고 싶으면 운전자에게 말해 주세요'
-            : '정확한 위치는 운행이 끝나면 지워요. 운전자가 이 카풀을 즐겨찾기에 추가하면 다음 운행을 위해 탈 곳과 내릴 곳이 저장돼요'}
+            ? '즐겨찾기 카풀이라 탈 곳과 내릴 곳은 다음 운행을 위해 운전자 차에 저장돼요. 지우고 싶으면 운전자에게 말해 주세요'
+            : '운전자가 이 카풀을 즐겨찾기에 추가하면 다음 운행을 위해 탈 곳과 내릴 곳이 저장돼요'}
         </p>
+      </Card>
+
+      <Card className="gap-1">
+        <h2 className="t-strong">참여하기 전에 확인해 주세요</h2>
+        <p className="t-caption text-sub">
+          정산: {ruleWith(trip.rule)} 나눠요. {trip.include_driver ? '운전자 몫도 함께 계산해요' : '운전자 몫은 빼고 동승자끼리 나눠요'}
+        </p>
+        <p className="t-caption text-sub">위치: 정산이 끝나면 약 1km 단위로 줄이고, 24시간 뒤에는 동 이름만 남겨요</p>
       </Card>
 
       {full ? (
         <p className="t-caption text-center text-red-600">자리가 모두 찼어요. 함께 타려면 {trip.driver_name}님에게 말해 주세요</p>
       ) : (
-        !editing && <p className="t-caption text-center text-sub">참여하면 픽업 시간과 정산 금액을 여기서 볼 수 있어요</p>
+        !editing && (
+          <p className="t-caption text-center text-sub">
+            참여하면 위 정산 방법과 위치 보관에 동의한 것으로 봐요. 픽업 시간과 정산 금액은 여기서 볼 수 있어요
+          </p>
+        )
       )}
       <ErrorText error={error} />
       <Button onClick={submit} disabled={busy || !ready}>
@@ -498,10 +512,14 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
       <Card className="gap-1">
         <div className="flex items-center gap-2">
           <p className="t-caption text-brand">운행이 끝났어요 | {trip.title}</p>
-          {trip.settle_mode === 'direct' && <BatchPill status={trip.paid ? 'done' : 'requested'} />}
+          {s.provisional ? <Chip tone="accent">임시 금액</Chip> : trip.settle_mode === 'direct' && <BatchPill status={trip.paid ? 'done' : 'requested'} />}
         </div>
-        {!trip.settle_mode && (
-          <p className="t-caption text-sub">{trip.driver_name}님이 정산 방법을 고르는 중이에요. 고르면 보낼 곳이 여기에 떠요</p>
+        {s.provisional ? (
+          <p className="t-caption text-sub">차가 거리를 다시 확인하면 금액이 바뀔 수 있어요. 확정되면 보낼 곳이 여기에 떠요</p>
+        ) : (
+          !trip.settle_mode && (
+            <p className="t-caption text-sub">{trip.driver_name}님이 정산 방법을 고르는 중이에요. 고르면 보낼 곳이 여기에 떠요</p>
+          )
         )}
         <p className="t-strong text-sub">내 몫</p>
         <div className="flex items-baseline gap-1">
@@ -524,6 +542,7 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
           <p className="t-caption text-brand">
             {ruleText[rule]}
             {mine?.alone != null && mine.alone > mine.amount ? ` 혼자 갔다면 ${won(mine.alone)}이었어요` : ''}
+            {mine?.capped && ' 혼자 갔을 때보다 많지 않게 맞췄어요.'}
             {!withDriver && ' 운전자 몫은 빼고 동승자끼리 나눴어요'}
           </p>
         </div>
@@ -549,6 +568,12 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
               <span>{won(s.toll)}</span>
             </div>
           )}
+          {s.driver_absorbed != null && s.driver_absorbed > 0 && (
+            <div className="flex gap-2">
+              <span className="flex-1 text-sub">10원 단위로 맞추고 남은 끝전 (운전자가 냄)</span>
+              <span>{won(s.driver_absorbed)}</span>
+            </div>
+          )}
         </Card>
       )}
 
@@ -572,6 +597,8 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
         )}
       </Card>
 
+      <RecordChanges changes={me.record_changes ?? []} driverName={trip.driver_name} />
+
       <SavedPlace trip={trip} />
 
       {(hasPoint(me.pickup) || hasPoint(me.dropoff)) && (
@@ -592,7 +619,9 @@ function Settled({ trip, deviceKey }: { trip: PublicTrip; deviceKey: string }) {
       <p className="t-caption text-center text-faint">
         {trip.paid
           ? '정산이 끝나 계좌번호는 내려갔어요'
-          : trip.bank
+          : s.provisional
+            ? '임시 금액이라 아직 보내지 않아도 돼요'
+            : trip.bank
             ? '내 은행 앱에서 보내 주세요. 페어풀은 송금하지 않아요'
             : '송금은 쓰시는 앱에서 해 주세요. 정확한 위치는 이미 지웠어요'}
       </p>

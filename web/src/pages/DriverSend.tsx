@@ -128,6 +128,9 @@ function SendCard({ card }: { card: ShareCard }) {
           받을 계좌 {card.bank.bank_name} {card.bank.account} ({card.bank.holder})
         </p>
       )}
+      {card.provisional && (
+        <p className="t-caption text-brand">임시 금액이에요. 차에서 금액이 확정되면 계좌가 함께 보여요</p>
+      )}
       <div className="flex items-center gap-3 rounded-xl bg-brand-soft p-3">
         <span className="shrink-0 rounded-lg bg-card p-1.5">
           <QrImage text={url} size={96} />

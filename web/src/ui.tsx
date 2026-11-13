@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import QRCode from 'qrcode';
-import { demoMode, issueKinds, searchPlaces, type Bank, type BatchStatus, type IssueKind, type Place, type TripStatus } from './api';
+import { demoMode, issueKinds, searchPlaces, type Bank, type BatchStatus, type IssueKind, type Place, type RecordChange, type TripStatus } from './api';
 import glyph from './assets/figma/glyph.svg';
 import iconSearch from './assets/figma/icon-search.svg';
 import radioOff from './assets/figma/radio-off.svg';
@@ -533,6 +533,34 @@ export const dayLabel = (iso: string) => {
 };
 
 export const isToday = (iso: string) => new Date(iso).toDateString() === new Date().toDateString();
+
+const clock = (iso: string) => new Date(iso).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+const fieldName: Record<RecordChange['field'], string> = { boarded_at: '탄 시각', alighted_at: '내린 시각', seat: '자리' };
+
+// What the driver changed in my ride record, so a changed amount can be traced back (M3, M6).
+export function RecordChanges({ changes, driverName }: { changes: RecordChange[]; driverName: string }) {
+  if (changes.length === 0) return null;
+  const value = (c: RecordChange, v: string) => (c.field === 'seat' ? v : clock(v));
+  return (
+    <Card className="gap-2">
+      <h2 className="t-strong">{driverName}님이 고친 내 탑승 기록</h2>
+      {changes.map((c, i) => (
+        <div key={i} className="flex flex-col">
+          <span className="t-body">
+            {c.old && c.new
+              ? `${fieldName[c.field]} ${value(c, c.old)} → ${value(c, c.new)}`
+              : c.new
+                ? `${fieldName[c.field]} 새로 기록: ${value(c, c.new)}`
+                : `${fieldName[c.field]} 기록 지움: ${value(c, c.old!)}`}
+          </span>
+          <span className="t-caption text-faint">
+            {dayLabel(c.changed_at)} {clock(c.changed_at)}
+          </span>
+        </div>
+      ))}
+    </Card>
+  );
+}
 
 // Korean particle after a word: 은/는, 이/가, 을/를 depending on the last syllable's final consonant.
 export function josa(word: string, withFinal: string, withoutFinal: string) {
